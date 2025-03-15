@@ -26,9 +26,7 @@ The EAR is a metric used to determine whether the eyes are open or closed. It is
 
 Formula:
 
-\[
-EAR = \frac{\|P2 - P6\| + \|P3 - P5\|}{2 \times \|P1 - P4\|}
-\]
+![img.png](img.png)
 
 Where:
 
@@ -41,9 +39,7 @@ The EAR is calculated for both the left and right eyes, and the average EAR is u
 
 The baseline EAR represents the average EAR when the eyes are open and not blinking. It is calculated during the first `BASELINE_FRAMES` (e.g., 30 frames).
 
-\[
-Baseline_{EAR} = \frac{\sum EAR_i}{n}
-\]
+![img_1.png](img_1.png)
 
 This running average smooths out small variations and establishes a reliable baseline EAR.
 
@@ -51,9 +47,7 @@ This running average smooths out small variations and establishes a reliable bas
 
 The dynamic threshold determines whether a blink has occurred. It is calculated as a percentage of the baseline EAR:
 
-\[
-Threshold = Baseline_{EAR} \times 0.85
-\]
+![img_2.png](img_2.png)
 
 If the average EAR drops below 85% of the baseline EAR, a blink is detected.
 
@@ -63,9 +57,7 @@ The EAR values can fluctuate due to small facial movements. To mitigate noise, t
 
 Smoothing formula:
 
-\[
-Smoothed_{EAR} = \frac{\sum EAR_{history}}{n}
-\]
+![img_3.png](img_3.png)
 
 Where `EAR_history` is a list containing the last few EAR values.
 
@@ -77,9 +69,7 @@ A cooldown period prevents multiple detections for a single blink. After detecti
 
 To account for eye movements, we track the center of the eye over time. The eye movement detection method calculates the variance in eye position over recent frames:
 
-\[
-Variance = \frac{\max(Var(eye_{history}))}{Eye_{Size}}
-\]
+![img_4.png](img_4.png)
 
 If the normalized variance exceeds a threshold (e.g., 0.15), significant movement is detected.
 
@@ -87,9 +77,7 @@ If the normalized variance exceeds a threshold (e.g., 0.15), significant movemen
 
 A consistency check ensures that sudden, irregular EAR changes do not lead to false positives. It compares differences between recent EAR values:
 
-\[
-Max(\Delta EAR) > Threshold
-\]
+![img_5.png](img_5.png)
 
 If the largest EAR change exceeds a predefined threshold (e.g., 0.15), a blink is flagged.
 
@@ -97,9 +85,7 @@ If the largest EAR change exceeds a predefined threshold (e.g., 0.15), a blink i
 
 To check for potential obstructions (e.g., glare or reflections), the eye region is processed with thresholding:
 
-\[
-Reflection_{Count} = \sum Mask > 0
-\]
+![img_6.png](img_6.png)
 
 If reflections are minimal, the detection remains valid.
 
