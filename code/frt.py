@@ -4,6 +4,10 @@ from deepfake_detection import (
     analyze_reflections,
     FACE_CENTER_LANDMARK
 )
+from blink_detection import (
+    check_double_blink,
+    check_eye_movement_during_blink,
+)
 import cv2
 import dlib
 import numpy as np
@@ -17,8 +21,6 @@ def main(demo_mode=False, security_mode=False):
     BASELINE_FRAMES = 30
     SMOOTHING_WINDOW = 2
     BLINK_COOLDOWN = 1
-    DOUBLE_BLINK_THRESHOLD = 0.8
-
 
     blink_count = 0
     blink_active = False
@@ -28,13 +30,11 @@ def main(demo_mode=False, security_mode=False):
     cooldown_counter = 0
     blink_timestamps = []
 
-
     def calculate_ear(eye):
         A = distance.euclidean(eye[1], eye[5])
         B = distance.euclidean(eye[2], eye[4])
         C = distance.euclidean(eye[0], eye[3])
         return (A + B) / (2.0 * C)
-
 
     # I won't be using fixed ear_threshold, because otherwise it would not be robust to individual differences in
     # eye shape and size. Instead, I'll be calculating dynamic threshold.
@@ -51,7 +51,6 @@ def main(demo_mode=False, security_mode=False):
             frame_count += 1
         return baseline_ear
 
-
     # smoothing is necessary because EAR calculation can be noisy due to
     # small variations in facial landmarks.
     def smooth_ear(ear):
@@ -59,7 +58,6 @@ def main(demo_mode=False, security_mode=False):
         if len(ear_history) > SMOOTHING_WINDOW:
             ear_history.pop(0)
         return np.mean(ear_history)
-
 
     detector = dlib.get_frontal_face_detector()
     shape_predictor = dlib.shape_predictor("../dat/shape_predictor_68_face_landmarks.dat")
@@ -97,8 +95,8 @@ def main(demo_mode=False, security_mode=False):
             avg_ear = smooth_ear((left_ear + right_ear) / 2.0)
             print(f"[METRICS] Frame {frame_count} - Left EAR: {left_ear:.4f}, Right EAR: {right_ear:.4f}, Avg: {avg_ear:.4f}")
 
-            left_eye_movement = check_eye_movement(left_eye, face_center, blink_active)
-            right_eye_movement = check_eye_movement(right_eye, face_center, blink_active)
+            left_eye_movement = check_eye_movement_during_blink(left_eye, face_center, blink_active, check_eye_movement)
+            right_eye_movement = check_eye_movement_during_blink(right_eye, face_center, blink_active, check_eye_movement)
 
             if frame_count < BASELINE_FRAMES:
                 baseline_ear = calculate_baseline_ear(avg_ear)
@@ -109,25 +107,18 @@ def main(demo_mode=False, security_mode=False):
                         blink_active = True
                         blink_timestamps.append(time.time())
                         print(f"[BLINK] Blink started at {time.strftime('%H:%M:%S')}")
-                else:
-                    if blink_active:
-                        duration = time.time() - blink_timestamps[-1]
-                        blink_count += 1
-                        blink_active = False
-                        cooldown_counter = BLINK_COOLDOWN
-                        print(f"[BLINK] Blink completed (duration: {duration:.2f}s, total: {blink_count})")
+                elif avg_ear >= dynamic_threshold and blink_active:
+                    blink_active = False
+                    blink_count += 1
+                    cooldown_counter = BLINK_COOLDOWN
+                    duration = time.time() - blink_timestamps[-1]
+                    print(f"[BLINK] Blink completed (duration: {duration:.2f}s, total: {blink_count})")
 
-            # double blink
-            if len(blink_timestamps) >= 2:
-                time_diff = blink_timestamps[-1] - blink_timestamps[-2]
-                if 0.3 <= time_diff <= DOUBLE_BLINK_THRESHOLD:
-                    print(f"[BLINK] Double blink detected! Interval: {time_diff:.2f}s")
+                if check_double_blink(blink_timestamps):
+                    print(f"[BLINK] Double blink detected!")
                     blink_timestamps.clear()
-                    # reset state
                     blink_active = False
                     cooldown_counter = BLINK_COOLDOWN
-                    print("[BLINK] Reset blink state after double blink detection")
-                    blink_timestamps.clear()
 
             left_eye_np = np.array(left_eye)
             right_eye_np = np.array(right_eye)

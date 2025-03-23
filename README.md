@@ -1,6 +1,6 @@
 # Blink Detection Using Eye Aspect Ratio (EAR)
 
-This project implements a blink detection system using the Eye Aspect Ratio (EAR) and a dynamic threshold based on a baseline EAR. The system is designed to be robust to individual differences in eye shape and size, using facial landmarks to detect blinks in real time.
+This project implements a robust blink detection system using the Eye Aspect Ratio (EAR) with a dynamic threshold based on a baseline EAR. The system is designed to adapt to individual differences in eye shape and size while also incorporating additional checks to detect deepfake artifacts.
 
 ## Table of Contents
 
@@ -13,128 +13,108 @@ This project implements a blink detection system using the Eye Aspect Ratio (EAR
   - [Eye Movement Detection](#eye-movement-detection)
   - [EAR Consistency Check](#ear-consistency-check)
   - [Reflection Analysis](#reflection-analysis)
+  - [Double Blink Detection](#double-blink-detection)
+- [Used Formulas](#used-formulas)
 - [Code Overview](#code-overview)
 - [Key Variables](#key-variables)
 - [Usage](#usage)
 - [Dependencies](#dependencies)
+- [Changelog](#changelog)
 
 ## How It Works
 
 ### Eye Aspect Ratio (EAR)
+The EAR is a metric used to determine whether the eyes are open or closed. It is calculated as:
 
-The EAR is a metric used to determine whether the eyes are open or closed. It is calculated using the vertical and horizontal distances between specific facial landmarks around the eyes.
-
-Formula:
 
 ![img.png](img.png)
 
-Where:
 
-- \( P1, P2, P3, P4, P5, P6 \) are the facial landmarks around the eye.
-- \( \|A - B\| \) represents the Euclidean distance between two points.
-
-The EAR is calculated for both the left and right eyes, and the average EAR is used for blink detection.
+where `p1` to `p6` are the eye landmark points.
 
 ### Baseline EAR
-
-The baseline EAR represents the average EAR when the eyes are open and not blinking. It is calculated during the first `BASELINE_FRAMES` (e.g., 30 frames).
-
-![img_1.png](img_1.png)
-
-This running average smooths out small variations and establishes a reliable baseline EAR.
+To account for individual differences in eye structure, the system calculates an initial baseline EAR over the first few frames. The EAR value is updated dynamically to create a more adaptive system.
 
 ### Dynamic Threshold
-
-The dynamic threshold determines whether a blink has occurred. It is calculated as a percentage of the baseline EAR:
-
-![img_2.png](img_2.png)
-
-If the average EAR drops below 85% of the baseline EAR, a blink is detected.
+Rather than using a fixed threshold, the system determines a dynamic threshold based on the baseline EAR. A blink is detected when the EAR value drops below 75% of the baseline.
 
 ### Smoothing EAR Values
-
-The EAR values can fluctuate due to small facial movements. To mitigate noise, the EAR values are smoothed over a small window of frames.
-
-Smoothing formula:
-
-![img_3.png](img_3.png)
-
-Where `EAR_history` is a list containing the last few EAR values.
+Since facial landmark detection can introduce noise, the EAR values are smoothed using a small moving average window.
 
 ### Cooldown Period
-
-A cooldown period prevents multiple detections for a single blink. After detecting a blink, the system waits for a short period before registering another blink.
+To prevent false positive blinks from being registered in quick succession, a cooldown period is implemented. After detecting a blink, the system enforces a short delay before allowing another blink to be counted.
 
 ### Eye Movement Detection
-
-To account for eye movements, we track the center of the eye over time. The eye movement detection method calculates the variance in eye position over recent frames:
-
-![img_4.png](img_4.png)
-
-If the normalized variance exceeds a threshold (e.g., 0.15), significant movement is detected.
+Using eye landmarks and the nose landmark as a reference, the system tracks eye movements across frames. If unusual eye movement patterns are detected, the system flags it as a potential anomaly.
 
 ### EAR Consistency Check
-
-A consistency check ensures that sudden, irregular EAR changes do not lead to false positives. It compares differences between recent EAR values:
-
-![img_5.png](img_5.png)
-
-If the largest EAR change exceeds a predefined threshold (e.g., 0.15), a blink is flagged.
+An abrupt change in EAR values during a blink is considered suspicious. The system monitors the rate of change and flags unnatural shifts in EAR.
 
 ### Reflection Analysis
+Deepfake videos often struggle with realistic eye reflections. The system extracts the eye region and analyzes light reflections. If no reflections are detected, the system raises an alert.
 
-To check for potential obstructions (e.g., glare or reflections), the eye region is processed with thresholding:
+### Double Blink Detection
+A double blink is detected when two consecutive blinks occur within a dynamically calculated time window. This helps detect natural human behavior and adds another layer of analysis.
 
-![img_6.png](img_6.png)
+## Used Formulas
 
-If reflections are minimal, the detection remains valid.
+### Moving Average Smoothing
+![img_3.png](img_3.png)
+
+### Dynamic Blink Threshold
+![img_2.png](img_2.png)
+
+### EAR Change Detection
+![img_1.png](img_1.png)
 
 ## Code Overview
 
-The code consists of the following key components:
-
-- **EAR Calculation:** `calculate_ear` computes the EAR for a given eye.
-- **Baseline EAR Calculation:** `calculate_baseline_ear` establishes the baseline EAR over the first 30 frames.
-- **Smoothing:** `smooth_ear` averages the last few EAR values to reduce noise.
-- **Blink Detection:** The main loop captures video frames, detects faces, calculates the EAR, and checks against the dynamic threshold.
-- **Eye Movement Detection:** `check_eye_movement` tracks eye position history and detects significant movement.
-- **EAR Consistency Check:** `check_ear_consistency` prevents erratic EAR changes from falsely triggering blinks.
-- **Reflection Analysis:** `analyze_reflections` checks for excessive light reflections in the eye region.
-- **Display:** The system overlays the EAR values, blink count, baseline EAR, and dynamic threshold on the video feed.
+- The system captures video frames using OpenCV and detects faces using `dlib`.
+- Facial landmarks are extracted and used to calculate the EAR.
+- Blinks are detected based on dynamic thresholds.
+- Additional deepfake detection checks are performed.
+- The user interface overlays real-time feedback on the video.
 
 ## Key Variables
 
-- `baseline_ear`: The average EAR when the eyes are open.
-- `dynamic_threshold`: 85% of the baseline EAR, used to detect blinks.
-- `ear_history`: A list of the last 3 EAR values for smoothing.
-- `cooldown_counter`: Prevents multiple detections for a single blink.
-- `eye_position_history`: Tracks recent eye positions to monitor movement.
-- `EYE_MOVEMENT_THRESHOLD`: Defines the threshold for significant eye movement.
-- `ear_history_blink`: Stores recent EAR values for consistency checks.
-- `EAR_CHANGE_THRESHOLD`: Defines the threshold for EAR consistency validation.
+| Variable               | Description |
+|------------------------|-------------|
+| `BASELINE_FRAMES`      | Number of frames to compute the initial EAR baseline |
+| `BLINK_COOLDOWN`       | Time before another blink can be counted |
+| `SMOOTHING_WINDOW`     | Number of frames used to smooth EAR values |
+| `EAR_CHANGE_THRESHOLD` | Threshold for detecting abrupt EAR changes |
+| `VAR_THRESHOLD`        | Threshold for detecting unnatural eye movements |
+| `DOUBLE_BLINK_THRESHOLD` | Max time difference between two blinks for a double blink detection |
+| `REFLECTION_THRESHOLD`  | Minimum brightness level for valid eye reflections |
 
 ## Usage
 
-1. Install the required dependencies:
-
-```bash
-pip install opencv-python dlib scipy numpy
-```
-
-2. Download the `shape_predictor_68_face_landmarks.dat` file from dlib's website and place it in the project directory.
-
-3. Run the script:
-
-```bash
-python blink_detection.py
-```
-
-4. Follow the on-screen instructions to calculate the baseline EAR and start detecting blinks.
+1. Install dependencies using:
+   ```
+   pip install -r requirements.txt
+   ```
+2. Run the script:
+   ```
+   python blink_detection.py
+   ```
+3. Look at the camera while the system calculates the baseline EAR.
+4. The system will detect blinks and analyze eye behavior in real-time.
+5. Press `q` to exit the application.
 
 ## Dependencies
 
-- `opencv-python`: For video capture and frame processing.
-- `dlib`: For face detection and facial landmark detection.
-- `scipy`: For distance calculations.
-- `numpy`: For numerical operations and EAR smoothing.
+- `OpenCV`
+- `dlib`
+- `numpy`
+- `scipy`
+
+## Changelog
+
+### v1.1
+- Added `REFLECTION_THRESHOLD` for improved deepfake detection
+- Optimized EAR smoothing algorithm
+- Improved cooldown logic for more reliable blink detection
+
+### v1.0
+- Initial release with EAR-based blink detection and anomaly detection features
 
