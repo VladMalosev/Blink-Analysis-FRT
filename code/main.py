@@ -1,4 +1,3 @@
-import cv2
 from frt import main as security_test
 
 
@@ -25,7 +24,7 @@ def show_menu():
         elif choice == '3':
             login_user()
         elif choice == '4':
-            run_security_test()
+            run_security_test(interactive=True)
         elif choice == '5':
             print("Exiting system...")
             break
@@ -60,12 +59,18 @@ def login_user():
     print("Login system under development")
 
 
-def run_security_test():
+def run_security_test(interactive=False):
     print("\n" + "-" * 30)
-    print(" Interactive Security Test ")
+    print(" Interactive Security Test " if interactive else " Security Test ")
     print("-" * 30)
-    print("Starting advanced security checks...")
-    security_test(security_mode=True)
+    if interactive:
+        print("You will need to complete 4 blink-based challenges:")
+        print("1. Single normal blink")
+        print("2. Double quick blink")
+        print("3. Keep eyes open for 3 seconds")
+        print("4. Triple slow blink")
+        print("\nFollow the on-screen instructions...")
+    security_test(interactive_mode=interactive)
 
 
 if __name__ == "__main__":

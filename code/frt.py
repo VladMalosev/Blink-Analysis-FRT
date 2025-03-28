@@ -1,13 +1,22 @@
-from deepfake_detection import (
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+
+from functions.blink_detection import (
+    check_double_blink,
+    check_eye_movement_during_blink,
+)
+
+from functions.deepfake_detection import (
     check_eye_movement,
     check_ear_consistency,
     analyze_reflections,
     FACE_CENTER_LANDMARK
 )
-from blink_detection import (
-    check_double_blink,
-    check_eye_movement_during_blink,
-)
+
+from functions.face_validation import FaceValidator
+from functions.interactive_test import InteractiveBlinkTest
+
 import cv2
 import dlib
 import numpy as np
@@ -15,7 +24,7 @@ from scipy.spatial import distance
 import time
 
 
-def main(demo_mode=False, security_mode=False):
+def main(demo_mode=False, interactive_mode=False):
     global blink_count, blink_active, baseline_ear, frame_count, ear_history, cooldown_counter, blink_timestamps
 
     BASELINE_FRAMES = 30
@@ -29,6 +38,15 @@ def main(demo_mode=False, security_mode=False):
     ear_history = []
     cooldown_counter = 0
     blink_timestamps = []
+    face_validator = FaceValidator()
+
+    if interactive_mode:
+        blink_test = InteractiveBlinkTest()
+        current_test = 0
+        blink_test.start_test(current_test)
+        test_start_time = time.time()
+        last_blink_count = 0
+
 
     def calculate_ear(eye):
         A = distance.euclidean(eye[1], eye[5])
@@ -81,6 +99,19 @@ def main(demo_mode=False, security_mode=False):
         for face in faces:
             face_detected = True
             landmarks = shape_predictor(gray_frame, face)
+
+
+            validation_results = face_validator.validate_face_position(face, landmarks)
+            if validation_results['face_too_far']:
+                cv2.putText(frame, "Move Closer!", (10, 330), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                print("[VALIDATION] Face too far from camera")
+            elif validation_results['face_too_close']:
+                cv2.putText(frame, "Move Back Slightly!", (10, 330), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                print("[VALIDATION] Face too close to camera")
+            if validation_results['head_tilted']:
+                cv2.putText(frame, f"Straighten Your Head! ({validation_results['tilt_angle']:.1f} degrees)",
+                           (10, 360), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                print(f"[VALIDATION] Head tilted ({validation_results['tilt_angle']:.1f}°)")
 
             face_center = np.array([
                 landmarks.part(FACE_CENTER_LANDMARK).x,
@@ -137,11 +168,23 @@ def main(demo_mode=False, security_mode=False):
                 print(f"[WARNING] Eye region extraction failed: {str(e)}")
                 continue
 
+
+
             if left_eye_movement or right_eye_movement:
                 cv2.putText(frame, "Unnatural Eye Movement!", (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 print(f"[DETECTION] Unnatural eye movement detected (L: {left_eye_movement}, R: {right_eye_movement})")
-
             ear_consistency = check_ear_consistency(avg_ear)
+
+            if interactive_mode and blink_test.all_tests_passed():
+                cv2.putText(frame, "ALL TESTS PASSED! Press 'q' to exit", (200, 200),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.imshow("Blink Detection", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+                continue
+
+            cv2.imshow("Blink Detection", frame)
+
             if blink_active and ear_consistency:
                 cv2.putText(frame, "Abrupt EAR Change Detected!", (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 print(f"[DETECTION] Abrupt EAR change during blink")
@@ -153,6 +196,36 @@ def main(demo_mode=False, security_mode=False):
 
             for point in left_eye + right_eye:
                 cv2.circle(frame, point, 2, (0, 255, 0), -1)
+
+                if interactive_mode:
+                    if current_test < len(blink_test.test_sequence):
+                        if blink_count > last_blink_count:
+                            result = blink_test.update_blink(time.time())
+                            if result and result[0]:
+                                blink_test.test_results[current_test] = True
+                                current_test += 1
+                                if current_test < len(blink_test.test_sequence):
+                                    blink_test.start_test(current_test)
+                                    test_start_time = time.time()
+
+                        result = blink_test.update_eyes_open(avg_ear, baseline_ear)
+                        if result and result[0]:
+                            blink_test.test_results[current_test] = True
+                            current_test += 1
+                            if current_test < len(blink_test.test_sequence):
+                                blink_test.start_test(current_test)
+                                test_start_time = time.time()
+
+                    last_blink_count = blink_count
+
+                    blink_test.get_visual_feedback(frame, baseline_ear, avg_ear)
+                    if blink_test.all_tests_passed():
+                        cv2.putText(frame, "ALL TESTS PASSED! Press 'q' to exit", (200, 200),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                        cv2.imshow("Blink Detection", frame)
+                        if cv2.waitKey(1) & 0xFF == ord('q'):
+                            break
+                        continue
 
         if cooldown_counter > 0:
             cooldown_counter -= 1

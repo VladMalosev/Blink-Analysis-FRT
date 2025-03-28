@@ -149,7 +149,6 @@ def analyze_reflections(eye_region):
     gray_eye = cv2.cvtColor(eye_region, cv2.COLOR_BGR2GRAY)
     _, reflection_mask = cv2.threshold(gray_eye, 100, 255, cv2.THRESH_BINARY)
     reflection_count = np.sum(reflection_mask > 0)
-    cv2.imshow("Reflection Mask", reflection_mask)
 
     debug_info['count'] = reflection_count
     debug_info['reflections_found'] = reflection_count >= 2
