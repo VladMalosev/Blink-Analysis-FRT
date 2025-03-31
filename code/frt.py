@@ -1,5 +1,7 @@
 import sys
 from pathlib import Path
+import random
+
 sys.path.append(str(Path(__file__).parent.parent))
 
 from functions.blink_detection import (
@@ -16,6 +18,7 @@ from functions.deepfake_detection import (
 
 from functions.face_validation import FaceValidator
 from functions.interactive_test import InteractiveBlinkTest
+from functions.photo_attack_detection import PhotoAttackDetector
 
 import cv2
 import dlib
@@ -39,6 +42,7 @@ def main(demo_mode=False, interactive_mode=False):
     cooldown_counter = 0
     blink_timestamps = []
     face_validator = FaceValidator()
+    photo_attack_detector = PhotoAttackDetector()
 
     if interactive_mode:
         blink_test = InteractiveBlinkTest()
@@ -136,6 +140,7 @@ def main(demo_mode=False, interactive_mode=False):
                 if avg_ear < dynamic_threshold:
                     if not blink_active and cooldown_counter == 0:
                         blink_active = True
+                        photo_attack_detector.blink_start_time = time.time()
                         blink_timestamps.append(time.time())
                         print(f"[BLINK] Blink started at {time.strftime('%H:%M:%S')}")
                 elif avg_ear >= dynamic_threshold and blink_active:
@@ -168,12 +173,36 @@ def main(demo_mode=False, interactive_mode=False):
                 print(f"[WARNING] Eye region extraction failed: {str(e)}")
                 continue
 
+            frame_data = {
+                'blink_timestamps': blink_timestamps,
+                'is_blinking': blink_active,
+                'eye_landmarks': [(p[0], p[1]) for p in left_eye + right_eye],
+                'eye_region': left_eye_region,
+                'avg_ear': avg_ear,
+                'left_ear': left_ear,
+                'right_ear': right_ear,
+                'frame': frame
+            }
+
+            attack_result = photo_attack_detector.check_photo_attack(frame_data)
+
+            if attack_result['is_photo']:
+                cv2.putText(frame, "PHOTO ATTACK DETECTED!", (10, 390),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                for i, reason in enumerate(attack_result['reasons']):
+                    cv2.putText(frame, reason, (10, 420 + i * 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
+                print(f"[ATTACK DETECTED] Reasons: {', '.join(attack_result['reasons'])}")
 
 
             if left_eye_movement or right_eye_movement:
                 cv2.putText(frame, "Unnatural Eye Movement!", (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 print(f"[DETECTION] Unnatural eye movement detected (L: {left_eye_movement}, R: {right_eye_movement})")
             ear_consistency = check_ear_consistency(avg_ear)
+            if ear_consistency:
+                cv2.putText(frame, "Abrupt EAR Change Detected!", (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255),
+                            2)
+                print(f"[DETECTION] Abrupt EAR change during blink")
 
             if interactive_mode and blink_test.all_tests_passed():
                 cv2.putText(frame, "ALL TESTS PASSED! Press 'q' to exit", (200, 200),
