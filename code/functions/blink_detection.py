@@ -4,6 +4,9 @@ import time
 DOUBLE_BLINK_THRESHOLD = 0.8
 
 
+
+
+
 def calculate_dynamic_blink_threshold(blink_timestamps):
     if len(blink_timestamps) < 2:
         return DOUBLE_BLINK_THRESHOLD

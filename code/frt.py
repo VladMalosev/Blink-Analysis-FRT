@@ -28,7 +28,7 @@ import time
 
 
 def main(demo_mode=False, interactive_mode=False):
-    global blink_count, blink_active, baseline_ear, frame_count, ear_history, cooldown_counter, blink_timestamps
+    global blink_count, blink_active, baseline_ear, baseline_eye_height, frame_count, ear_history, cooldown_counter, blink_timestamps
 
     BASELINE_FRAMES = 30
     SMOOTHING_WINDOW = 2
@@ -41,8 +41,25 @@ def main(demo_mode=False, interactive_mode=False):
     ear_history = []
     cooldown_counter = 0
     blink_timestamps = []
+    consecutive_low_ear_frames = 0
     face_validator = FaceValidator()
     photo_attack_detector = PhotoAttackDetector()
+
+    CONSECUTIVE_FRAMES_THRESHOLD = 1
+    EYE_CLOSURE_THRESHOLD = 0.8
+    MIN_BLINK_DURATION = 0.05
+    MAX_BLINK_DURATION = 0.4
+    SYMMETRY_THRESHOLD = 0.2
+    BLINK_COMPLETION_THRESHOLD = 0.80
+
+    EYE_HEIGHT_CLOSURE_THRESHOLD = 0.70
+    EYE_HEIGHT_OPEN_THRESHOLD = 0.70
+
+    blink_start_time = 0
+    min_ear_during_blink = 1.0
+    blink_eye_positions = None
+
+
 
     if interactive_mode:
         blink_test = InteractiveBlinkTest()
@@ -50,7 +67,6 @@ def main(demo_mode=False, interactive_mode=False):
         blink_test.start_test(current_test)
         test_start_time = time.time()
         last_blink_count = 0
-
 
     def calculate_ear(eye):
         A = distance.euclidean(eye[1], eye[5])
@@ -60,16 +76,29 @@ def main(demo_mode=False, interactive_mode=False):
 
     # I won't be using fixed ear_threshold, because otherwise it would not be robust to individual differences in
     # eye shape and size. Instead, I'll be calculating dynamic threshold.
-    def calculate_baseline_ear(avg_ear):
-        global baseline_ear, frame_count
+    def calculate_baseline_ear(avg_ear, left_eye, right_eye):
+        global baseline_ear, baseline_eye_height, frame_count
         if frame_count < BASELINE_FRAMES:
             if baseline_ear is None:
                 baseline_ear = avg_ear
-                print(f"[BASELINE] Initial baseline EAR set to {baseline_ear:.4f}")
+                # Calculate initial eye height
+                left_height = max(p[1] for p in left_eye) - min(p[1] for p in left_eye)
+                right_height = max(p[1] for p in right_eye) - min(p[1] for p in right_eye)
+                baseline_eye_height = (left_height + right_height) / 2
+                print(
+                    f"[BASELINE] Initial baseline EAR set to {baseline_ear:.4f}, eye height: {baseline_eye_height:.1f}px")
             else:
-                prev = baseline_ear
+                prev_ear = baseline_ear
                 baseline_ear = (baseline_ear * frame_count + avg_ear) / (frame_count + 1)
-                print(f"[BASELINE] Updated baseline EAR {prev:.4f} → {baseline_ear:.4f}")
+
+                # Update eye height baseline
+                left_height = max(p[1] for p in left_eye) - min(p[1] for p in left_eye)
+                right_height = max(p[1] for p in right_eye) - min(p[1] for p in right_eye)
+                current_height = (left_height + right_height) / 2
+                baseline_eye_height = (baseline_eye_height * frame_count + current_height) / (frame_count + 1)
+
+                print(
+                    f"[BASELINE] Updated baseline EAR {prev_ear:.4f} → {baseline_ear:.4f}, eye height: {baseline_eye_height:.1f}px")
             frame_count += 1
         return baseline_ear
 
@@ -93,6 +122,11 @@ def main(demo_mode=False, interactive_mode=False):
             print("[ERROR] Failed to capture frame")
             break
 
+        current_time = time.time()
+
+        if interactive_mode:
+            blink_test.update_test_state(current_time)
+
         gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = detector(gray_frame)
 
@@ -104,7 +138,6 @@ def main(demo_mode=False, interactive_mode=False):
             face_detected = True
             landmarks = shape_predictor(gray_frame, face)
 
-
             validation_results = face_validator.validate_face_position(face, landmarks)
             if validation_results['face_too_far']:
                 cv2.putText(frame, "Move Closer!", (10, 330), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
@@ -114,7 +147,7 @@ def main(demo_mode=False, interactive_mode=False):
                 print("[VALIDATION] Face too close to camera")
             if validation_results['head_tilted']:
                 cv2.putText(frame, f"Straighten Your Head! ({validation_results['tilt_angle']:.1f} degrees)",
-                           (10, 360), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                            (10, 360), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 print(f"[VALIDATION] Head tilted ({validation_results['tilt_angle']:.1f}°)")
 
             face_center = np.array([
@@ -128,28 +161,90 @@ def main(demo_mode=False, interactive_mode=False):
             left_ear = calculate_ear(left_eye)
             right_ear = calculate_ear(right_eye)
             avg_ear = smooth_ear((left_ear + right_ear) / 2.0)
-            print(f"[METRICS] Frame {frame_count} - Left EAR: {left_ear:.4f}, Right EAR: {right_ear:.4f}, Avg: {avg_ear:.4f}")
+            print(
+                f"[METRICS] Frame {frame_count} - Left EAR: {left_ear:.4f}, Right EAR: {right_ear:.4f}, Avg: {avg_ear:.4f}")
 
             left_eye_movement = check_eye_movement_during_blink(left_eye, face_center, blink_active, check_eye_movement)
-            right_eye_movement = check_eye_movement_during_blink(right_eye, face_center, blink_active, check_eye_movement)
-
+            right_eye_movement = check_eye_movement_during_blink(right_eye, face_center, blink_active,
+                                                                 check_eye_movement)
             if frame_count < BASELINE_FRAMES:
-                baseline_ear = calculate_baseline_ear(avg_ear)
+                baseline_ear = calculate_baseline_ear(avg_ear, left_eye, right_eye)
             else:
-                dynamic_threshold = baseline_ear * 0.75
-                if avg_ear < dynamic_threshold:
-                    if not blink_active and cooldown_counter == 0:
-                        blink_active = True
-                        photo_attack_detector.blink_start_time = time.time()
-                        blink_timestamps.append(time.time())
-                        print(f"[BLINK] Blink started at {time.strftime('%H:%M:%S')}")
-                elif avg_ear >= dynamic_threshold and blink_active:
-                    blink_active = False
-                    blink_count += 1
-                    cooldown_counter = BLINK_COOLDOWN
-                    duration = time.time() - blink_timestamps[-1]
-                    print(f"[BLINK] Blink completed (duration: {duration:.2f}s, total: {blink_count})")
+                dynamic_threshold = baseline_ear * EYE_CLOSURE_THRESHOLD
 
+                # calc eye height
+                current_left_height = max(p[1] for p in left_eye) - min(p[1] for p in left_eye)
+                current_right_height = max(p[1] for p in right_eye) - min(p[1] for p in right_eye)
+                current_eye_height_avg = (current_left_height + current_right_height) / 2
+
+                if not blink_active and cooldown_counter == 0:
+                    if consecutive_low_ear_frames >= CONSECUTIVE_FRAMES_THRESHOLD:
+                        # eye height check to start condition
+                        if (left_ear < dynamic_threshold
+                            and right_ear < dynamic_threshold
+                            and abs(left_ear - right_ear) < SYMMETRY_THRESHOLD
+                            and current_eye_height_avg < baseline_eye_height * EYE_HEIGHT_CLOSURE_THRESHOLD):
+                            blink_active = True
+
+                if avg_ear < dynamic_threshold:
+                    consecutive_low_ear_frames += 1
+                else:
+                    consecutive_low_ear_frames = 0
+
+                if not blink_active and cooldown_counter == 0:
+                    if consecutive_low_ear_frames >= CONSECUTIVE_FRAMES_THRESHOLD:
+                        if (left_ear < dynamic_threshold and right_ear < dynamic_threshold and
+                                abs(left_ear - right_ear) < SYMMETRY_THRESHOLD):
+                            blink_active = True
+                            blink_start_time = time.time()
+                            min_ear_during_blink = avg_ear
+                            blink_eye_positions = (left_eye, right_eye)  # store initial eye positions
+                            print(f"[BLINK] Potential blink started (EAR: {avg_ear:.3f})")
+
+                # track minimum EAR and check for completion, to prevent
+                # adding up when eyes are squinted
+                elif blink_active:
+                    if avg_ear < min_ear_during_blink:
+                        min_ear_during_blink = avg_ear
+
+                    if avg_ear >= baseline_ear * BLINK_COMPLETION_THRESHOLD or (time.time() - blink_start_time) > MAX_BLINK_DURATION:
+                        blink_duration = time.time() - blink_start_time
+
+                        if (blink_duration >= MIN_BLINK_DURATION
+                                and min_ear_during_blink <= baseline_ear * 0.7
+                                and current_eye_height_avg >= baseline_eye_height * EYE_HEIGHT_OPEN_THRESHOLD):
+
+                            # check if eye position changed much
+                            if blink_eye_positions:
+                                left_movement = check_eye_movement_during_blink(left_eye, face_center, blink_active,
+                                                                                check_eye_movement)
+                                right_movement = check_eye_movement_during_blink(right_eye, face_center, blink_active,
+                                                                                 check_eye_movement)
+
+                                if not left_movement and not right_movement:
+                                    blink_count += 1
+                                    blink_timestamps.append(time.time())
+                                    print(
+                                        f"[BLINK] Detected (duration: {blink_duration:.3f}s, min EAR: {min_ear_during_blink:.3f})")
+                                else:
+                                    print(f"[BLINK] Rejected due to eye movement during blink")
+                            else:
+                                blink_count += 1
+                                blink_timestamps.append(time.time())
+                                print(
+                                    f"[BLINK] Detected (duration: {blink_duration:.3f}s, min EAR: {min_ear_during_blink:.3f})")
+
+                        else:
+                            print(
+                                f"[BLINK] Rejected - Eyes didn't reopen fully (Height: {current_eye_height_avg:.1f} vs Baseline: {baseline_eye_height:.1f})")
+
+                        blink_active = False
+                        cooldown_counter = BLINK_COOLDOWN
+                        consecutive_low_ear_frames = 0
+                        min_ear_during_blink = 1.0
+                        blink_eye_positions = None
+
+                # check for double blink
                 if check_double_blink(blink_timestamps):
                     print(f"[BLINK] Double blink detected!")
                     blink_timestamps.clear()
@@ -162,13 +257,17 @@ def main(demo_mode=False, interactive_mode=False):
 
             try:
                 left_eye_region = frame[
-                    max(0, int(min(left_eye_np[:, 1])) - padding):min(frame.shape[0], int(max(left_eye_np[:, 1])) + padding),
-                    max(0, int(min(left_eye_np[:, 0])) - padding):min(frame.shape[1], int(max(left_eye_np[:, 0])) + padding)
-                ]
+                                  max(0, int(min(left_eye_np[:, 1])) - padding):min(frame.shape[0], int(max(
+                                      left_eye_np[:, 1])) + padding),
+                                  max(0, int(min(left_eye_np[:, 0])) - padding):min(frame.shape[1], int(max(
+                                      left_eye_np[:, 0])) + padding)
+                                  ]
                 right_eye_region = frame[
-                    max(0, int(min(right_eye_np[:, 1])) - padding):min(frame.shape[0], int(max(right_eye_np[:, 1])) + padding),
-                    max(0, int(min(right_eye_np[:, 0])) - padding):min(frame.shape[1], int(max(right_eye_np[:, 0])) + padding)
-                ]
+                                   max(0, int(min(right_eye_np[:, 1])) - padding):min(frame.shape[0], int(max(
+                                       right_eye_np[:, 1])) + padding),
+                                   max(0, int(min(right_eye_np[:, 0])) - padding):min(frame.shape[1], int(max(
+                                       right_eye_np[:, 0])) + padding)
+                                   ]
             except Exception as e:
                 print(f"[WARNING] Eye region extraction failed: {str(e)}")
                 continue
@@ -194,7 +293,6 @@ def main(demo_mode=False, interactive_mode=False):
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
                 print(f"[ATTACK DETECTED] Reasons: {', '.join(attack_result['reasons'])}")
 
-
             if left_eye_movement or right_eye_movement:
                 cv2.putText(frame, "Unnatural Eye Movement!", (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 print(f"[DETECTION] Unnatural eye movement detected (L: {left_eye_movement}, R: {right_eye_movement})")
@@ -203,6 +301,28 @@ def main(demo_mode=False, interactive_mode=False):
                 cv2.putText(frame, "Abrupt EAR Change Detected!", (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255),
                             2)
                 print(f"[DETECTION] Abrupt EAR change during blink")
+            if interactive_mode and blink_test.any_test_failed():
+                cv2.putText(frame, "TEST FAILED - Press any key to continue",
+                            (200, 200), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                cv2.imshow("Blink Detection", frame)
+
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    print("[SYSTEM] Shutting down...")
+                    break
+                elif key != 255:
+                    if interactive_mode and blink_test.any_test_failed():
+                        current_test += 1
+                        if current_test < len(blink_test.test_sequence):
+                            blink_test.start_test(current_test)
+                            test_start_time = time.time()
+
+            if interactive_mode and (blink_test.all_tests_passed() or blink_test.any_test_failed()):
+                results = blink_test.get_final_results()
+                print("\nTest Results:")
+                for i, result in enumerate(results['results']):
+                    status = "PASSED" if result['passed'] else f"FAILED: {result['failure_message']}"
+                    print(f"Test {i + 1}: {result['description']} - {status}")
 
             if interactive_mode and blink_test.all_tests_passed():
                 cv2.putText(frame, "ALL TESTS PASSED! Press 'q' to exit", (200, 200),
@@ -215,7 +335,8 @@ def main(demo_mode=False, interactive_mode=False):
             cv2.imshow("Blink Detection", frame)
 
             if blink_active and ear_consistency:
-                cv2.putText(frame, "Abrupt EAR Change Detected!", (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                cv2.putText(frame, "Abrupt EAR Change Detected!", (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255),
+                            2)
                 print(f"[DETECTION] Abrupt EAR change during blink")
 
             reflections = analyze_reflections(left_eye_region) or analyze_reflections(right_eye_region)
@@ -237,7 +358,7 @@ def main(demo_mode=False, interactive_mode=False):
                                     blink_test.start_test(current_test)
                                     test_start_time = time.time()
 
-                        result = blink_test.update_eyes_open(avg_ear, baseline_ear)
+                        result = blink_test.update_eyes_open(avg_ear, baseline_ear, time.time())
                         if result and result[0]:
                             blink_test.test_results[current_test] = True
                             current_test += 1
@@ -247,7 +368,7 @@ def main(demo_mode=False, interactive_mode=False):
 
                     last_blink_count = blink_count
 
-                    blink_test.get_visual_feedback(frame, baseline_ear, avg_ear)
+                    blink_test.get_visual_feedback(frame, baseline_ear, avg_ear, time.time())
                     if blink_test.all_tests_passed():
                         cv2.putText(frame, "ALL TESTS PASSED! Press 'q' to exit", (200, 200),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
@@ -264,6 +385,14 @@ def main(demo_mode=False, interactive_mode=False):
             cv2.putText(frame, f"Right EAR: {right_ear:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             cv2.putText(frame, f"Blinks: {blink_count}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
+            if frame_count >= BASELINE_FRAMES:
+                # Visualize blink detection state
+                blink_status = "BLINKING" if blink_active else "READY"
+                cv2.putText(frame, f"Status: {blink_status}", (450, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                cv2.putText(frame, f"EAR Ratio: {avg_ear / baseline_ear:.2f}", (450, 70),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
             if frame_count < BASELINE_FRAMES:
                 cv2.putText(frame, f"Calculating baseline... {frame_count}/{BASELINE_FRAMES}", (10, 120),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
@@ -273,7 +402,8 @@ def main(demo_mode=False, interactive_mode=False):
                 cv2.putText(frame, f"Baseline EAR: {baseline_ear:.2f}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             (0, 255, 0), 2)
                 if dynamic_threshold is not None:
-                    cv2.putText(frame, f"Dynamic Threshold: {dynamic_threshold:.2f}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX,
+                    cv2.putText(frame, f"Dynamic Threshold: {dynamic_threshold:.2f}", (10, 150),
+                                cv2.FONT_HERSHEY_SIMPLEX,
                                 0.6, (0, 255, 0), 2)
 
         cv2.imshow("Blink Detection", frame)
@@ -284,6 +414,7 @@ def main(demo_mode=False, interactive_mode=False):
 
     cap.release()
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()

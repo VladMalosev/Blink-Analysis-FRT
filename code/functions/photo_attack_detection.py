@@ -94,31 +94,37 @@ class PhotoAttackDetector:
         if processed is None:
             return 0.0
 
-        # fourier transform to analyze frequency patterns
+        if len(self.texture_history) < 5:
+            self.texture_history.append(processed)
+            return 0.0
+
+        # check for high-frequency patterns
         fft = np.fft.fft2(processed)
         fft_shift = np.fft.fftshift(fft)
-
         magnitude = np.abs(fft_shift)
         magnitude[magnitude == 0] = 1e-10
         magnitude = 20 * np.log(magnitude)
 
         h, w = magnitude.shape
         cy, cx = h // 2, w // 2
-        y_start = max(cy - 10, 0)
-        y_end = min(cy + 10, h)
-        x_start = max(cx - 10, 0)
-        x_end = min(cx + 10, w)
+        outer_band = magnitude[cy - 5:cy + 5, cx - 5:cx + 5]  # center reg
+        outer_band_mean = np.mean(outer_band)
 
-        hf_region = magnitude[y_start:y_end, x_start:x_end]
+        # unnatural pixel patterns
+        pixel_variance = np.var(processed)
+        if pixel_variance < 10:  # low variance -> static image
+            return 1.0
 
-        if hf_region.size == 0:
-            return 0.0
+        # compare with prev frames
+        diff_score = np.mean([cv2.absdiff(processed, prev).mean()
+                              for prev in list(self.texture_history)[-5:]])
 
-        hf_score = np.mean(hf_region)
+        if outer_band_mean > 38 and diff_score < 5:
+            return 1.5
+        elif outer_band_mean > 35 and diff_score < 8:
+            return 1.0
 
-        # used to detect displayed photos by analyzing screen flicker artifacts
-        if hf_score > 35:
-            return 1.2
+        self.texture_history.append(processed)
         return 0.0
 
     # analyze blink timing patterns for naturalness
@@ -290,10 +296,12 @@ class PhotoAttackDetector:
             reasons.append("Unnatural eyelid movement")
 
         # 7. screen artifact detection
-        screen_score = self.detect_screen_artifacts(frame_data['eye_region'])
-        if screen_score > 0.8:
-            current_score += 1.5
-            reasons.append("Screen artifacts detected")
+        screen_score = 0.0
+        if current_score > 1.5:
+            screen_score = self.detect_screen_artifacts(frame_data['eye_region'])
+            if screen_score > 1.2:
+                current_score += screen_score
+                reasons.append("Possible screen artifacts detected")
 
         self.suspicion_score = max(0, self.suspicion_score * 0.8 + current_score * 1.2)
 
