@@ -32,9 +32,11 @@ def check_double_blink(blink_timestamps):
 
 def check_eye_movement_during_blink(eye_landmarks, face_center, is_blinking=False, check_eye_movement=None):
     if is_blinking:
-        return False  # skip during the blink
+        return False
 
     if check_eye_movement is None:
         raise ValueError("check_eye_movement function must be provided")
 
-    return check_eye_movement(eye_landmarks, face_center, is_blinking)
+    movement_info = check_eye_movement(eye_landmarks, face_center, is_blinking)
+
+    return movement_info.get('movement_detected', False)

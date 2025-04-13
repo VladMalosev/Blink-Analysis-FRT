@@ -6,9 +6,11 @@ EAR_CHANGE_THRESHOLD = 0.25
 NORMALIZED_VARIANCE_THRESHOLD = 0.25
 EAR_WINDOW = 10
 MIN_EYE_SIZE = 100
-VAR_THRESHOLD = 0.01
+VAR_THRESHOLD = 0.003
 EYE_MOVEMENT_WINDOW = 30
 FACE_CENTER_LANDMARK = 30  # nose landmark tip
+MICROSACCADE_MIN = 0.001
+MICROSACCADE_MAX = 0.003
 
 ear_history_blink = []
 eye_position_history = []
@@ -27,6 +29,7 @@ def check_eye_movement(eye_landmarks, face_center, is_blinking=False):
 
     debug_info = {
         'movement_detected': False,
+        'microsaccade_detected': False,
         'reason': [],
         'vars': {}
     }
@@ -34,20 +37,20 @@ def check_eye_movement(eye_landmarks, face_center, is_blinking=False):
     if is_blinking:
         debug_info['reason'].append("Blink in progress - check skipped")
         print(f"[EYE MOVEMENT] {debug_info}")
-        return False
+        return debug_info
 
     eye_landmarks_np = np.array(eye_landmarks)
     if len(eye_landmarks_np) < 6:
         debug_info['reason'].append("Insufficient eye landmarks (need 6 points)")
         print(f"[EYE MOVEMENT] {debug_info}")
-        return False
+        return debug_info
 
     # eye center loc relative to face center
     valid_points = eye_landmarks_np[(eye_landmarks_np[:, 0] > 0) & (eye_landmarks_np[:, 1] > 0)]
     if len(valid_points) < 4:
         debug_info['reason'].append("Not enough valid eye points (need 4+)")
         print(f"[EYE MOVEMENT] {debug_info}")
-        return False
+        return debug_info
 
     absolute_eye_center = np.mean(valid_points, axis=0)
     relative_eye_center = absolute_eye_center - face_center
@@ -69,7 +72,7 @@ def check_eye_movement(eye_landmarks, face_center, is_blinking=False):
         if len(movements) == 0:
             debug_info['reason'].append("No movement data available")
             print(f"[EYE MOVEMENT] {debug_info}")
-            return False
+            return debug_info
 
         movement_variance = np.var(movements)
         current_eye_size = calculate_eye_size(eye_landmarks_np)
@@ -84,18 +87,28 @@ def check_eye_movement(eye_landmarks, face_center, is_blinking=False):
             'threshold': f"{VAR_THRESHOLD:.2%}"
         }
 
-        if normalized_variance > VAR_THRESHOLD:
-            debug_info['movement_detected'] = True
-            debug_info['reason'].append(
-                f"Eye movement intensity {normalized_variance:.2%} exceeds threshold {VAR_THRESHOLD:.2%}")
+        if MICROSACCADE_MIN <= normalized_variance <= MICROSACCADE_MAX:
+            if normalized_variance < MICROSACCADE_MIN:
+                debug_info['reason'].append("No significant movement detected")
+            elif MICROSACCADE_MIN <= normalized_variance <= MICROSACCADE_MAX:
+                debug_info['microsaccade_detected'] = True
+                debug_info['reason'].append("Normal microsaccade detected")
+            elif MICROSACCADE_MAX < normalized_variance <= VAR_THRESHOLD:
+                debug_info['photo_attack_suspected'] = True  # New flag
+                debug_info['reason'].append("Suspicious movement pattern detected")
+            elif normalized_variance > VAR_THRESHOLD:
+                debug_info['movement_detected'] = True
+                debug_info['reason'].append("Excessive eye movement detected")
 
-        print(f"[EYE MOVEMENT] {'Detected' if debug_info['movement_detected'] else 'Normal'} | "
+        print(f"[EYE MOVEMENT] {'Microsaccade' if debug_info['microsaccade_detected'] else 'Movement'} | "
+              f"Type: {'NORMAL' if debug_info['microsaccade_detected'] else 'UNNATURAL'} | "
               f"Intensity: {normalized_variance:.2%} (Threshold: {VAR_THRESHOLD:.2%}) | "
               f"Details: {', '.join(debug_info['reason']) if debug_info['reason'] else 'Normal movement'}")
-        return debug_info['movement_detected']
+
+        return debug_info
 
     print(f"[EYE MOVEMENT] Insufficient data (need {EYE_MOVEMENT_WINDOW} frames)")
-    return False
+    return debug_info
 
 
 def check_ear_consistency(ear):

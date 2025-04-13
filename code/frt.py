@@ -114,6 +114,7 @@ def main(demo_mode=False, interactive_mode=False):
     shape_predictor = dlib.shape_predictor("../dat/shape_predictor_68_face_landmarks.dat")
     cap = cv2.VideoCapture(0)
 
+
     print(f"[CONFIG] Baseline frames: {BASELINE_FRAMES}, Blink cooldown: {BLINK_COOLDOWN}s")
 
     while True:
@@ -123,6 +124,7 @@ def main(demo_mode=False, interactive_mode=False):
             break
 
         current_time = time.time()
+        ear_consistency = False
 
         if interactive_mode:
             blink_test.update_test_state(current_time)
@@ -286,17 +288,25 @@ def main(demo_mode=False, interactive_mode=False):
             attack_result = photo_attack_detector.check_photo_attack(frame_data)
 
             if attack_result['is_photo']:
-                cv2.putText(frame, "PHOTO ATTACK DETECTED!", (10, 390),
+                cv2.putText(frame, "Potential attack detected!", (10, 390),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 for i, reason in enumerate(attack_result['reasons']):
                     cv2.putText(frame, reason, (10, 420 + i * 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
-                print(f"[ATTACK DETECTED] Reasons: {', '.join(attack_result['reasons'])}")
+            elif time.time() - photo_attack_detector.last_blink_time > 15:
+                cv2.putText(frame, "Please blink to verify liveness", (10, 330),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
             if left_eye_movement or right_eye_movement:
-                cv2.putText(frame, "Unnatural Eye Movement!", (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                print(f"[DETECTION] Unnatural eye movement detected (L: {left_eye_movement}, R: {right_eye_movement})")
-            ear_consistency = check_ear_consistency(avg_ear)
+                # Only show warning if movement_detected is True
+                if (isinstance(left_eye_movement, dict) and left_eye_movement.get('movement_detected')) or \
+                        (isinstance(right_eye_movement, dict) and right_eye_movement.get('movement_detected')):
+                    cv2.putText(frame, "Unnatural Eye Movement!", (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255),
+                                2)
+                    print(
+                        f"[DETECTION] Unnatural eye movement detected (L: {left_eye_movement}, R: {right_eye_movement})")
+
+                    ear_consistency = check_ear_consistency(avg_ear)
             if ear_consistency:
                 cv2.putText(frame, "Abrupt EAR Change Detected!", (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255),
                             2)

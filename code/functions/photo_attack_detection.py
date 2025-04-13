@@ -277,8 +277,8 @@ class PhotoAttackDetector:
 
         no_blink_penalty = 0.0
         time_since_last_blink = time.time() - self.last_blink_time
-        if not blink_timestamps or time_since_last_blink > 5:
-            no_blink_penalty = min(2.0, time_since_last_blink / 3)
+        if not blink_timestamps or time_since_last_blink > 15:
+            no_blink_penalty = min(2.0, time_since_last_blink / 6)
             reasons.append(f"No blinks detected in {int(time_since_last_blink)} seconds")
         current_score += no_blink_penalty
 

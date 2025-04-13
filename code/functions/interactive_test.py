@@ -378,3 +378,4 @@ class InteractiveBlinkTest:
             'passed': self.all_tests_passed(),
             'results': results
         }
+
