@@ -1,5 +1,10 @@
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent))
+
 import numpy as np
 import cv2
+from microsaccade_detection import MicrosaccadeDetector
 
 EYE_MOVEMENT_THRESHOLD = 5
 EAR_CHANGE_THRESHOLD = 0.25
@@ -17,6 +22,7 @@ eye_position_history = []
 face_center_history = []
 BASELINE_EYE_SIZE = None
 
+microsaccade_detector = MicrosaccadeDetector(sampling_rate=60)
 
 def calculate_eye_size(eye_landmarks_np):
     x = eye_landmarks_np[:, 0]
@@ -25,7 +31,7 @@ def calculate_eye_size(eye_landmarks_np):
 
 
 def check_eye_movement(eye_landmarks, face_center, is_blinking=False):
-    global eye_position_history, face_center_history
+    global eye_position_history, face_center_history, microsaccade_detector
 
     debug_info = {
         'movement_detected': False,
@@ -45,7 +51,7 @@ def check_eye_movement(eye_landmarks, face_center, is_blinking=False):
         print(f"[EYE MOVEMENT] {debug_info}")
         return debug_info
 
-    # eye center loc relative to face center
+    # Get eye center position
     valid_points = eye_landmarks_np[(eye_landmarks_np[:, 0] > 0) & (eye_landmarks_np[:, 1] > 0)]
     if len(valid_points) < 4:
         debug_info['reason'].append("Not enough valid eye points (need 4+)")
@@ -53,61 +59,60 @@ def check_eye_movement(eye_landmarks, face_center, is_blinking=False):
         return debug_info
 
     absolute_eye_center = np.mean(valid_points, axis=0)
-    relative_eye_center = absolute_eye_center - face_center
 
-    eye_position_history.append(relative_eye_center)
-    face_center_history.append(face_center)
+    # Use the microsaccade detector
+    detected, velocity, details = microsaccade_detector.detect_microsaccades(absolute_eye_center)
 
-    if len(eye_position_history) > EYE_MOVEMENT_WINDOW:
-        eye_position_history.pop(0)
-        face_center_history.pop(0)
+    if detected:
+        debug_info['microsaccade_detected'] = True
+        debug_info['reason'].append("Natural microsaccade detected")
+        debug_info['details'] = details
+        print(f"[MICROSACCADE] Detected: velocity={velocity:.2f} deg/s, amplitude={details['amplitude']:.2f} deg, duration={details['duration']:.1f}ms")
+    else:
+        # Fall back to the original movement detection if no microsaccade detected
+        relative_eye_center = absolute_eye_center - face_center
+        eye_position_history.append(relative_eye_center)
+        face_center_history.append(face_center)
 
-    if len(eye_position_history) >= 10:
-        movements = []
-        for i in range(1, len(eye_position_history)):
-            dx = eye_position_history[i][0] - eye_position_history[i - 1][0]
-            dy = eye_position_history[i][1] - eye_position_history[i - 1][1]
-            movements.append(np.sqrt(dx ** 2 + dy ** 2))
+        if len(eye_position_history) > EYE_MOVEMENT_WINDOW:
+            eye_position_history.pop(0)
+            face_center_history.pop(0)
 
-        if len(movements) == 0:
-            debug_info['reason'].append("No movement data available")
-            print(f"[EYE MOVEMENT] {debug_info}")
-            return debug_info
+        if len(eye_position_history) >= 10:
+            movements = []
+            for i in range(1, len(eye_position_history)):
+                dx = eye_position_history[i][0] - eye_position_history[i-1][0]
+                dy = eye_position_history[i][1] - eye_position_history[i-1][1]
+                movements.append(np.sqrt(dx**2 + dy**2))
 
-        movement_variance = np.var(movements)
-        current_eye_size = calculate_eye_size(eye_landmarks_np)
+            if movements:
+                movement_variance = np.var(movements)
+                current_eye_size = calculate_eye_size(eye_landmarks_np)
+                normalized_variance = movement_variance / current_eye_size if current_eye_size > 0 else 0
 
-        # dynamic normalization based on eye size
-        normalized_variance = movement_variance / current_eye_size if current_eye_size > 0 else 0
+                debug_info['vars'] = {
+                    'movement_intensity': f"{movement_variance:.4f} pixels²",
+                    'eye_size': f"{current_eye_size} pixels²",
+                    'normalized_intensity': f"{normalized_variance:.2%}",
+                    'threshold': f"{VAR_THRESHOLD:.2%}"
+                }
 
-        debug_info['vars'] = {
-            'movement_intensity': f"{movement_variance:.4f} pixels²",
-            'eye_size': f"{current_eye_size} pixels²",
-            'normalized_intensity': f"{normalized_variance:.2%}",
-            'threshold': f"{VAR_THRESHOLD:.2%}"
-        }
+                if normalized_variance > VAR_THRESHOLD:
+                    debug_info['movement_detected'] = True
+                    debug_info['reason'].append("Excessive eye movement detected")
+                elif MICROSACCADE_MAX < normalized_variance <= VAR_THRESHOLD:
+                    debug_info['photo_attack_suspected'] = True
+                    debug_info['reason'].append("Suspicious movement pattern detected")
 
-        if MICROSACCADE_MIN <= normalized_variance <= MICROSACCADE_MAX:
-            if normalized_variance < MICROSACCADE_MIN:
-                debug_info['reason'].append("No significant movement detected")
-            elif MICROSACCADE_MIN <= normalized_variance <= MICROSACCADE_MAX:
-                debug_info['microsaccade_detected'] = True
-                debug_info['reason'].append("Normal microsaccade detected")
-            elif MICROSACCADE_MAX < normalized_variance <= VAR_THRESHOLD:
-                debug_info['photo_attack_suspected'] = True  # New flag
-                debug_info['reason'].append("Suspicious movement pattern detected")
-            elif normalized_variance > VAR_THRESHOLD:
-                debug_info['movement_detected'] = True
-                debug_info['reason'].append("Excessive eye movement detected")
+    # Check if movement is natural using the microsaccade detector
+    if not microsaccade_detector.is_natural_movement():
+        debug_info['movement_detected'] = True
+        debug_info['reason'].append("Unnatural eye movement pattern")
 
-        print(f"[EYE MOVEMENT] {'Microsaccade' if debug_info['microsaccade_detected'] else 'Movement'} | "
-              f"Type: {'NORMAL' if debug_info['microsaccade_detected'] else 'UNNATURAL'} | "
-              f"Intensity: {normalized_variance:.2%} (Threshold: {VAR_THRESHOLD:.2%}) | "
-              f"Details: {', '.join(debug_info['reason']) if debug_info['reason'] else 'Normal movement'}")
+    print(f"[EYE MOVEMENT] {'Microsaccade' if debug_info['microsaccade_detected'] else 'Movement'} | "
+          f"Type: {'NORMAL' if debug_info['microsaccade_detected'] else 'UNNATURAL'} | "
+          f"Details: {', '.join(debug_info['reason']) if debug_info['reason'] else 'Normal movement'}")
 
-        return debug_info
-
-    print(f"[EYE MOVEMENT] Insufficient data (need {EYE_MOVEMENT_WINDOW} frames)")
     return debug_info
 
 

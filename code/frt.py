@@ -2,7 +2,11 @@ import sys
 from pathlib import Path
 import random
 
+
 sys.path.append(str(Path(__file__).parent.parent))
+
+from functions.microsaccade_detection import MicrosaccadeDetector
+
 
 from functions.blink_detection import (
     check_double_blink,
@@ -113,6 +117,7 @@ def main(demo_mode=False, interactive_mode=False):
     detector = dlib.get_frontal_face_detector()
     shape_predictor = dlib.shape_predictor("../dat/shape_predictor_68_face_landmarks.dat")
     cap = cv2.VideoCapture(0)
+    microsaccade_detector = MicrosaccadeDetector(sampling_rate=60)
 
 
     print(f"[CONFIG] Baseline frames: {BASELINE_FRAMES}, Blink cooldown: {BLINK_COOLDOWN}s")
@@ -160,9 +165,25 @@ def main(demo_mode=False, interactive_mode=False):
             left_eye = [(landmarks.part(i).x, landmarks.part(i).y) for i in range(36, 42)]
             right_eye = [(landmarks.part(i).x, landmarks.part(i).y) for i in range(42, 48)]
 
+            left_eye_center = np.mean(left_eye, axis=0)
+            right_eye_center = np.mean(right_eye, axis=0)
+
+            # вetect microsaccades in both eyes
+            left_detected, left_velocity, left_details = microsaccade_detector.detect_microsaccades(left_eye_center)
+            right_detected, right_velocity, right_details = microsaccade_detector.detect_microsaccades(right_eye_center)
+
+            natural_movement = microsaccade_detector.is_natural_movement()
+
+            if not natural_movement:
+                cv2.putText(frame, "Unnatural Eye Movement Pattern!", (10, 240),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                print("[DETECTION] Unnatural eye movement pattern detected")
+
+
             left_ear = calculate_ear(left_eye)
             right_ear = calculate_ear(right_eye)
             avg_ear = smooth_ear((left_ear + right_ear) / 2.0)
+
             print(
                 f"[METRICS] Frame {frame_count} - Left EAR: {left_ear:.4f}, Right EAR: {right_ear:.4f}, Avg: {avg_ear:.4f}")
 
@@ -201,6 +222,7 @@ def main(demo_mode=False, interactive_mode=False):
                             blink_start_time = time.time()
                             min_ear_during_blink = avg_ear
                             blink_eye_positions = (left_eye, right_eye)  # store initial eye positions
+                            microsaccade_detector.register_blink(True, avg_ear)
                             print(f"[BLINK] Potential blink started (EAR: {avg_ear:.3f})")
 
                 # track minimum EAR and check for completion, to prevent
@@ -215,6 +237,7 @@ def main(demo_mode=False, interactive_mode=False):
                         if (blink_duration >= MIN_BLINK_DURATION
                                 and min_ear_during_blink <= baseline_ear * 0.7
                                 and current_eye_height_avg >= baseline_eye_height * EYE_HEIGHT_OPEN_THRESHOLD):
+                            microsaccade_detector.register_blink(False, avg_ear)  # Blink ended
 
                             # check if eye position changed much
                             if blink_eye_positions:
@@ -294,7 +317,7 @@ def main(demo_mode=False, interactive_mode=False):
                     cv2.putText(frame, reason, (10, 420 + i * 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
             elif time.time() - photo_attack_detector.last_blink_time > 15:
-                cv2.putText(frame, "Please blink to verify liveness", (10, 330),
+                cv2.putText(frame, "Please blink to verify liveness", (10, 300),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
             if left_eye_movement or right_eye_movement:
@@ -394,6 +417,35 @@ def main(demo_mode=False, interactive_mode=False):
             cv2.putText(frame, f"Left EAR: {left_ear:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             cv2.putText(frame, f"Right EAR: {right_ear:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             cv2.putText(frame, f"Blinks: {blink_count}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            # Add these near your other status text displays
+            if left_detected:
+                cv2.putText(frame, f"L Microsaccade: {left_velocity:.1f} deg/s", (10, 450),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            if right_detected:
+                cv2.putText(frame, f"R Microsaccade: {right_velocity:.1f} deg/s", (10, 470),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+            saccade_rate = microsaccade_detector.get_microsaccade_rate()
+            cv2.putText(frame, f"Microsaccade Rate: {saccade_rate:.1f}/s", (10, 490),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+            if microsaccade_detector.calibration_complete:
+                status = "NATURAL" if natural_movement else "WARNING"
+                color = (0, 255, 0) if natural_movement else (0, 0, 255)
+                cv2.putText(frame, f"Microsaccade Status: {status}", (350, 90),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            else:
+                cv2.putText(frame, "Calibrating Microsaccade Detector...", (350, 90),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+            if microsaccade_detector.calibration_complete:
+                photo_attack_detected = microsaccade_detector.detect_photo_attack()
+                if photo_attack_detected:
+                    cv2.putText(frame, "PHOTO ATTACK SUSPECTED!", (350, 120),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    natural_movement = False
+
 
             if frame_count >= BASELINE_FRAMES:
                 # Visualize blink detection state
