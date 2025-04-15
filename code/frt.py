@@ -1,13 +1,9 @@
 import sys
 from pathlib import Path
-import random
-
 
 sys.path.append(str(Path(__file__).parent.parent))
 
 from functions.microsaccade_detection import MicrosaccadeDetector
-
-
 from functions.blink_detection import (
     check_double_blink,
     check_eye_movement_during_blink,
@@ -33,6 +29,37 @@ import time
 
 def main(demo_mode=False, interactive_mode=False):
     global blink_count, blink_active, baseline_ear, baseline_eye_height, frame_count, ear_history, cooldown_counter, blink_timestamps
+
+    def display_warnings(frame, warnings_list):
+        """Display warnings with priority."""
+        if not warnings_list:
+            return
+
+        # Sort warnings by priority (lower number = higher priority)
+        sorted_warnings = sorted(warnings_list, key=lambda w: w["priority"])
+
+        y_position = 240
+        displayed = 0
+
+        for warning in sorted_warnings:
+            if displayed < 3:
+                cv2.putText(frame, warning["text"], (10, y_position),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, warning["color"], 2)
+                y_position += 30
+                displayed += 1
+
+    warning_persistence = {
+        "attack": 0,
+        "eye_movement": 0,
+        "reflection": 0,
+        "ear_change": 0,
+        "position": 0,
+        "movement": 0,
+        "blink_reminder": 0
+    }
+
+    WARNING_PERSISTENCE_THRESHOLD = 30
+    MAX_WARNING_PERSISTENCE = 90
 
     BASELINE_FRAMES = 30
     SMOOTHING_WINDOW = 2
@@ -63,14 +90,20 @@ def main(demo_mode=False, interactive_mode=False):
     min_ear_during_blink = 1.0
     blink_eye_positions = None
 
+    calibration_complete = False
+    calibration_start_time = time.time()
+    CALIBRATION_PERIOD = 5
+    test_initialization_done = False
 
+    warnings_list = []
 
     if interactive_mode:
         blink_test = InteractiveBlinkTest()
         current_test = 0
-        blink_test.start_test(current_test)
-        test_start_time = time.time()
+        test_start_time = None
         last_blink_count = 0
+        test_interrupted = False
+        interactive_start_time = time.time()
 
     def calculate_ear(eye):
         A = distance.euclidean(eye[1], eye[5])
@@ -114,11 +147,18 @@ def main(demo_mode=False, interactive_mode=False):
             ear_history.pop(0)
         return np.mean(ear_history)
 
+
+        recent_ears = list(ear_history)[-5:]
+        avg_recent = sum(recent_ears) / len(recent_ears)
+
+        if abs(avg_ear - avg_recent) > 0.1:
+            return True
+        return False
+
     detector = dlib.get_frontal_face_detector()
     shape_predictor = dlib.shape_predictor("../dat/shape_predictor_68_face_landmarks.dat")
     cap = cv2.VideoCapture(0)
     microsaccade_detector = MicrosaccadeDetector(sampling_rate=60)
-
 
     print(f"[CONFIG] Baseline frames: {BASELINE_FRAMES}, Blink cooldown: {BLINK_COOLDOWN}s")
 
@@ -130,9 +170,21 @@ def main(demo_mode=False, interactive_mode=False):
 
         current_time = time.time()
         ear_consistency = False
+        warnings_list = []
+
+        if not calibration_complete and (current_time - calibration_start_time) >= CALIBRATION_PERIOD:
+            calibration_complete = True
+            print("[SYSTEM] Initial calibration complete, starting attack detection")
+
+            if interactive_mode and not test_initialization_done:
+                blink_test.start_test(current_test)
+                test_start_time = current_time
+                test_initialization_done = True
+                print("[SYSTEM] Starting interactive tests after calibration")
 
         if interactive_mode:
-            blink_test.update_test_state(current_time)
+            if calibration_complete and test_initialization_done:
+                blink_test.update_test_state(current_time)
 
         gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = detector(gray_frame)
@@ -147,14 +199,28 @@ def main(demo_mode=False, interactive_mode=False):
 
             validation_results = face_validator.validate_face_position(face, landmarks)
             if validation_results['face_too_far']:
-                cv2.putText(frame, "Move Closer!", (10, 330), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                warnings_list.append({
+                    "priority": 1,
+                    "type": "position",
+                    "text": "Move Closer!",
+                    "color": (0, 0, 255)
+                })
                 print("[VALIDATION] Face too far from camera")
             elif validation_results['face_too_close']:
-                cv2.putText(frame, "Move Back Slightly!", (10, 330), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                warnings_list.append({
+                    "priority": 1,
+                    "type": "position",
+                    "text": "Move Back Slightly!",
+                    "color": (0, 0, 255)
+                })
                 print("[VALIDATION] Face too close to camera")
             if validation_results['head_tilted']:
-                cv2.putText(frame, f"Straighten Your Head! ({validation_results['tilt_angle']:.1f} degrees)",
-                            (10, 360), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                warnings_list.append({
+                    "priority": 2,
+                    "type": "position",
+                    "text": f"Straighten Your Head! ({validation_results['tilt_angle']:.1f} degrees)",
+                    "color": (0, 0, 255)
+                })
                 print(f"[VALIDATION] Head tilted ({validation_results['tilt_angle']:.1f}°)")
 
             face_center = np.array([
@@ -168,17 +234,20 @@ def main(demo_mode=False, interactive_mode=False):
             left_eye_center = np.mean(left_eye, axis=0)
             right_eye_center = np.mean(right_eye, axis=0)
 
-            # вetect microsaccades in both eyes
+            # detect microsaccades in both eyes
             left_detected, left_velocity, left_details = microsaccade_detector.detect_microsaccades(left_eye_center)
             right_detected, right_velocity, right_details = microsaccade_detector.detect_microsaccades(right_eye_center)
 
             natural_movement = microsaccade_detector.is_natural_movement()
 
             if not natural_movement:
-                cv2.putText(frame, "Unnatural Eye Movement Pattern!", (10, 240),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                warnings_list.append({
+                    "priority": 2,
+                    "type": "movement",
+                    "text": "Unnatural Eye Movement Pattern!",
+                    "color": (0, 0, 255)
+                })
                 print("[DETECTION] Unnatural eye movement pattern detected")
-
 
             left_ear = calculate_ear(left_eye)
             right_ear = calculate_ear(right_eye)
@@ -204,9 +273,9 @@ def main(demo_mode=False, interactive_mode=False):
                     if consecutive_low_ear_frames >= CONSECUTIVE_FRAMES_THRESHOLD:
                         # eye height check to start condition
                         if (left_ear < dynamic_threshold
-                            and right_ear < dynamic_threshold
-                            and abs(left_ear - right_ear) < SYMMETRY_THRESHOLD
-                            and current_eye_height_avg < baseline_eye_height * EYE_HEIGHT_CLOSURE_THRESHOLD):
+                                and right_ear < dynamic_threshold
+                                and abs(left_ear - right_ear) < SYMMETRY_THRESHOLD
+                                and current_eye_height_avg < baseline_eye_height * EYE_HEIGHT_CLOSURE_THRESHOLD):
                             blink_active = True
 
                 if avg_ear < dynamic_threshold:
@@ -231,13 +300,14 @@ def main(demo_mode=False, interactive_mode=False):
                     if avg_ear < min_ear_during_blink:
                         min_ear_during_blink = avg_ear
 
-                    if avg_ear >= baseline_ear * BLINK_COMPLETION_THRESHOLD or (time.time() - blink_start_time) > MAX_BLINK_DURATION:
+                    if avg_ear >= baseline_ear * BLINK_COMPLETION_THRESHOLD or (
+                            time.time() - blink_start_time) > MAX_BLINK_DURATION:
                         blink_duration = time.time() - blink_start_time
 
                         if (blink_duration >= MIN_BLINK_DURATION
                                 and min_ear_during_blink <= baseline_ear * 0.7
                                 and current_eye_height_avg >= baseline_eye_height * EYE_HEIGHT_OPEN_THRESHOLD):
-                            microsaccade_detector.register_blink(False, avg_ear)  # Blink ended
+                            microsaccade_detector.register_blink(False, avg_ear)
 
                             # check if eye position changed much
                             if blink_eye_positions:
@@ -251,6 +321,14 @@ def main(demo_mode=False, interactive_mode=False):
                                     blink_timestamps.append(time.time())
                                     print(
                                         f"[BLINK] Detected (duration: {blink_duration:.3f}s, min EAR: {min_ear_during_blink:.3f})")
+
+                                    if interactive_mode and not test_interrupted:
+                                        blink_result = blink_test.update_blink(time.time())
+                                        if blink_result and blink_result[0]:
+                                            current_test += 1
+                                            if current_test < len(blink_test.test_sequence):
+                                                blink_test.start_test(current_test)
+                                                test_start_time = time.time()
                                 else:
                                     print(f"[BLINK] Rejected due to eye movement during blink")
                             else:
@@ -258,6 +336,14 @@ def main(demo_mode=False, interactive_mode=False):
                                 blink_timestamps.append(time.time())
                                 print(
                                     f"[BLINK] Detected (duration: {blink_duration:.3f}s, min EAR: {min_ear_during_blink:.3f})")
+
+                                if interactive_mode and not test_interrupted:
+                                    blink_result = blink_test.update_blink(time.time())
+                                    if blink_result and blink_result[0]:
+                                        current_test += 1
+                                        if current_test < len(blink_test.test_sequence):
+                                            blink_test.start_test(current_test)
+                                            test_start_time = time.time()
 
                         else:
                             print(
@@ -310,105 +396,182 @@ def main(demo_mode=False, interactive_mode=False):
 
             attack_result = photo_attack_detector.check_photo_attack(frame_data)
 
-            if attack_result['is_photo']:
-                cv2.putText(frame, "Potential attack detected!", (10, 390),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                for i, reason in enumerate(attack_result['reasons']):
-                    cv2.putText(frame, reason, (10, 420 + i * 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
-            elif time.time() - photo_attack_detector.last_blink_time > 15:
-                cv2.putText(frame, "Please blink to verify liveness", (10, 300),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            if interactive_mode:
+                if calibration_complete and test_initialization_done:
+                    attack_result = photo_attack_detector.check_photo_attack(frame_data)
+
+                    if attack_result['is_photo']:
+                        warnings_list.append({
+                            "priority": 0,
+                            "type": "attack",
+                            "text": "Potential attack detected!",
+                            "color": (0, 0, 255)
+                        })
+
+                        for i, reason in enumerate(attack_result['reasons']):
+                            warnings_list.append({
+                                "priority": 5,
+                                "type": "attack_detail",
+                                "text": reason,
+                                "color": (0, 0, 255)
+                            })
+
+                        if test_initialization_done and not test_interrupted:
+                            test_interrupted = True
+                            blink_test.test_results[blink_test.current_test] = False
+                            blink_test.failed_current_test = True
+                            blink_test.last_feedback = "Potential attack detected!"
+                            blink_test.last_feedback_time = current_time
+                else:
+                    cv2.putText(frame,
+                                f"Calibrating: {max(0, CALIBRATION_PERIOD - int(current_time - calibration_start_time))}s",
+                                (10, 210), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            else:
+                attack_result = photo_attack_detector.check_photo_attack(frame_data)
+
+                if attack_result['is_photo']:
+                    warnings_list.append({
+                        "priority": 0,
+                        "type": "attack",
+                        "text": "Potential attack detected!",
+                        "color": (0, 0, 255)
+                    })
+
+                    for i, reason in enumerate(attack_result['reasons']):
+                        warnings_list.append({
+                            "priority": 5,
+                            "type": "attack_detail",
+                            "text": reason,
+                            "color": (0, 0, 255)
+                        })
+
+                elif time.time() - photo_attack_detector.last_blink_time > 15 and calibration_complete:
+                    warnings_list.append({
+                        "priority": 3,
+                        "type": "blink_reminder",
+                        "text": "Please blink to verify liveness",
+                        "color": (0, 0, 255)
+                    })
+
+                if interactive_mode and not test_interrupted and not blink_test.test_sequence[
+                    blink_test.current_test].get('duration'):
+                    blink_test.last_feedback = "Please blink to verify liveness"
+                    blink_test.last_feedback_time = current_time
 
             if left_eye_movement or right_eye_movement:
-                # Only show warning if movement_detected is True
                 if (isinstance(left_eye_movement, dict) and left_eye_movement.get('movement_detected')) or \
                         (isinstance(right_eye_movement, dict) and right_eye_movement.get('movement_detected')):
-                    cv2.putText(frame, "Unnatural Eye Movement!", (10, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255),
-                                2)
-                    print(
-                        f"[DETECTION] Unnatural eye movement detected (L: {left_eye_movement}, R: {right_eye_movement})")
+                    # Only add warning if calibration is complete
+                    if calibration_complete:
+                        warnings_list.append({
+                            "priority": 2,
+                            "type": "eye_movement",
+                            "text": "Unnatural Eye Movement!",
+                            "color": (0, 0, 255)
+                        })
+                        print(
+                            f"[DETECTION] Unnatural eye movement detected (L: {left_eye_movement}, R: {right_eye_movement})")
 
-                    ear_consistency = check_ear_consistency(avg_ear)
+                        ear_consistency = check_ear_consistency(avg_ear)
+
             if ear_consistency:
-                cv2.putText(frame, "Abrupt EAR Change Detected!", (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255),
-                            2)
+                warnings_list.append({
+                    "priority": 2,
+                    "type": "ear_change",
+                    "text": "Abrupt EAR Change Detected!",
+                    "color": (0, 0, 255)
+                })
                 print(f"[DETECTION] Abrupt EAR change during blink")
-            if interactive_mode and blink_test.any_test_failed():
-                cv2.putText(frame, "TEST FAILED - Press any key to continue",
-                            (200, 200), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                cv2.imshow("Blink Detection", frame)
 
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    print("[SYSTEM] Shutting down...")
-                    break
-                elif key != 255:
-                    if interactive_mode and blink_test.any_test_failed():
+            if interactive_mode:
+                if blink_test.any_test_failed() or test_interrupted:
+                    cv2.putText(frame, "TEST FAILED - Press any key to continue",
+                                (200, 200), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    cv2.imshow("Blink Detection", frame)
+
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
+                        print("[SYSTEM] Shutting down...")
+                        break
+                    elif key != 255:
+                        if test_interrupted:
+                            test_interrupted = False
+
                         current_test += 1
                         if current_test < len(blink_test.test_sequence):
                             blink_test.start_test(current_test)
                             test_start_time = time.time()
 
-            if interactive_mode and (blink_test.all_tests_passed() or blink_test.any_test_failed()):
-                results = blink_test.get_final_results()
-                print("\nTest Results:")
-                for i, result in enumerate(results['results']):
-                    status = "PASSED" if result['passed'] else f"FAILED: {result['failure_message']}"
-                    print(f"Test {i + 1}: {result['description']} - {status}")
+                if blink_test.all_tests_passed() or blink_test.any_test_failed():
+                    results = blink_test.get_final_results()
+                    print("\nTest Results:")
+                    for i, result in enumerate(results['results']):
+                        status = "PASSED" if result['passed'] else f"FAILED: {result['failure_message']}"
+                        print(f"Test {i + 1}: {result['description']} - {status}")
 
-            if interactive_mode and blink_test.all_tests_passed():
-                cv2.putText(frame, "ALL TESTS PASSED! Press 'q' to exit", (200, 200),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                cv2.imshow("Blink Detection", frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-                continue
+                if blink_test.all_tests_passed():
+                    cv2.putText(frame, "ALL TESTS PASSED! Press 'q' to exit", (200, 200),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.imshow("Blink Detection", frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                    continue
 
-            cv2.imshow("Blink Detection", frame)
-
-            if blink_active and ear_consistency:
-                cv2.putText(frame, "Abrupt EAR Change Detected!", (10, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255),
-                            2)
-                print(f"[DETECTION] Abrupt EAR change during blink")
+                if not test_interrupted and blink_test.test_sequence[blink_test.current_test].get('duration'):
+                    eyes_result = blink_test.update_eyes_open(avg_ear, baseline_ear, current_time)
+                    if eyes_result and eyes_result[0]:
+                        current_test += 1
+                        if current_test < len(blink_test.test_sequence):
+                            blink_test.start_test(current_test)
+                            test_start_time = time.time()
 
             reflections = analyze_reflections(left_eye_region) or analyze_reflections(right_eye_region)
-            if reflections:
-                cv2.putText(frame, "No Reflections Detected!", (10, 300), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            if reflections and calibration_complete:
+                warnings_list.append({
+                    "priority": 3,
+                    "type": "reflection",
+                    "text": "No Reflections Detected!",
+                    "color": (0, 0, 255)
+                })
                 print("[DETECTION] No reflections detected in eyes")
 
             for point in left_eye + right_eye:
                 cv2.circle(frame, point, 2, (0, 255, 0), -1)
 
-                if interactive_mode:
-                    if current_test < len(blink_test.test_sequence):
-                        if blink_count > last_blink_count:
-                            result = blink_test.update_blink(time.time())
-                            if result and result[0]:
-                                blink_test.test_results[current_test] = True
-                                current_test += 1
-                                if current_test < len(blink_test.test_sequence):
-                                    blink_test.start_test(current_test)
-                                    test_start_time = time.time()
+            if interactive_mode and not test_interrupted:
+                blink_test.get_visual_feedback(frame, baseline_ear, avg_ear, current_time)
 
-                        result = blink_test.update_eyes_open(avg_ear, baseline_ear, time.time())
-                        if result and result[0]:
-                            blink_test.test_results[current_test] = True
-                            current_test += 1
-                            if current_test < len(blink_test.test_sequence):
-                                blink_test.start_test(current_test)
-                                test_start_time = time.time()
+        current_warning_types = [w["type"] for w in warnings_list]
+        for warning_type in warning_persistence:
+            if warning_type in current_warning_types:
+                warning_persistence[warning_type] = min(warning_persistence[warning_type] + 1, MAX_WARNING_PERSISTENCE)
+            else:
+                warning_persistence[warning_type] = max(warning_persistence[warning_type] - 2,
+                                                        0)
 
-                    last_blink_count = blink_count
+        critical_warnings = ["attack", "eye_movement", "ear_change"]
+        should_interrupt = any(warning_persistence[w] >= WARNING_PERSISTENCE_THRESHOLD for w in critical_warnings)
 
-                    blink_test.get_visual_feedback(frame, baseline_ear, avg_ear, time.time())
-                    if blink_test.all_tests_passed():
-                        cv2.putText(frame, "ALL TESTS PASSED! Press 'q' to exit", (200, 200),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                        cv2.imshow("Blink Detection", frame)
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                            break
-                        continue
+        # Only trigger test failure if calibration is complete
+        if should_interrupt and calibration_complete:
+            if interactive_mode and not test_interrupted:
+                test_interrupted = True
+                blink_test.test_results[blink_test.current_test] = False
+                blink_test.failed_current_test = True
+
+                most_persistent = max([(w, warning_persistence[w]) for w in critical_warnings],
+                                      key=lambda x: x[1])
+
+                if most_persistent[0] == "attack":
+                    blink_test.last_feedback = "Potential attack detected!"
+                elif most_persistent[0] == "eye_movement":
+                    blink_test.last_feedback = "Unnatural eye movement detected!"
+                elif most_persistent[0] == "ear_change":
+                    blink_test.last_feedback = "Inconsistent eye closure pattern!"
+
+                blink_test.last_feedback_time = current_time
+
+        display_warnings(frame, warnings_list)
 
         if cooldown_counter > 0:
             cooldown_counter -= 1
@@ -418,7 +581,6 @@ def main(demo_mode=False, interactive_mode=False):
             cv2.putText(frame, f"Right EAR: {right_ear:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             cv2.putText(frame, f"Blinks: {blink_count}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-            # Add these near your other status text displays
             if left_detected:
                 cv2.putText(frame, f"L Microsaccade: {left_velocity:.1f} deg/s", (10, 450),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
@@ -439,16 +601,14 @@ def main(demo_mode=False, interactive_mode=False):
                 cv2.putText(frame, "Calibrating Microsaccade Detector...", (350, 90),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-            if microsaccade_detector.calibration_complete:
+            if microsaccade_detector.calibration_complete and (not interactive_mode or calibration_complete):
                 photo_attack_detected = microsaccade_detector.detect_photo_attack()
                 if photo_attack_detected:
                     cv2.putText(frame, "PHOTO ATTACK SUSPECTED!", (350, 120),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                     natural_movement = False
 
-
             if frame_count >= BASELINE_FRAMES:
-                # Visualize blink detection state
                 blink_status = "BLINKING" if blink_active else "READY"
                 cv2.putText(frame, f"Status: {blink_status}", (450, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)

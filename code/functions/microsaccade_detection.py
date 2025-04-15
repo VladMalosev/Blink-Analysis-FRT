@@ -7,44 +7,52 @@ import cv2
 
 class MicrosaccadeDetector:
     def __init__(self, sampling_rate=60):
-        # Configuration parameters
-        self.in_blink_period = False
-        self.blink_end_time = 0
-        self.velocity_threshold = 3
-        self.min_duration = 3
-        self.max_duration = 60
-        self.min_amplitude = 0.05
-        self.max_amplitude = 2.5
-        self.sampling_rate = sampling_rate
-        self.lambda_factor = 6
-        self.pixel_to_degree = 0.05
+            self.in_blink_period = False
+            self.blink_end_time = 0
+            self.velocity_threshold = 3
+            self.min_duration = 3
+            self.max_duration = 60
+            self.min_amplitude = 0.05
+            self.max_amplitude = 2.5
+            self.sampling_rate = sampling_rate
+            self.lambda_factor = 6
+            self.pixel_to_degree = 0.05
 
-        self.eye_position_history = deque(maxlen=60)
-        self.time_history = deque(maxlen=60)
-        self.microsaccade_history = deque(maxlen=40)
-        self.velocity_history = deque(maxlen=30)
+            self.eye_position_history = deque(maxlen=60)
+            self.time_history = deque(maxlen=60)
+            self.microsaccade_history = deque(maxlen=40)
+            self.velocity_history = deque(maxlen=30)
 
-        self.direction_history = deque(maxlen=15)
-        self.amplitude_history = deque(maxlen=15)
-        self.inter_saccade_intervals = deque(maxlen=15)
+            self.direction_history = deque(maxlen=15)
+            self.amplitude_history = deque(maxlen=15)
+            self.inter_saccade_intervals = deque(maxlen=15)
 
-        self.calibration_complete = False
-        self.calibration_samples = 0
-        self.calibration_window = 60
-        self.baseline_std_x = 0
-        self.baseline_std_y = 0
+            self.calibration_complete = False
+            self.calibration_samples = 0
+            self.calibration_window = 60
+            self.baseline_std_x = 0
+            self.baseline_std_y = 0
 
-        self.blink_timestamps = []
-        self.microsaccade_during_blink = 0
-        self.post_blink_microsaccades = 0
+            self.blink_timestamps = []
+            self.microsaccade_during_blink = 0
+            self.post_blink_microsaccades = 0
 
-        self.last_detection_time = 0
-        self.detection_count = 0
+            self.last_detection_time = 0
+            self.detection_count = 0
 
-        self.suspicious_patterns_count = 0
-        self.natural_patterns_count = 0
-        self.consecutive_similar_movements = 0
-        self.eye_movement_variance = deque(maxlen=10)
+            self.consecutive_similar_movements = 0
+            self.eye_movement_variance = deque(maxlen=10)
+
+            self.position_variance = 0
+            self.interval_variability = 1.0
+            self.direction_variability = 1.0
+            self.last_analysis_time = 0
+            self.analysis_interval = 2.0
+
+            self.last_counter_reset_time = time.time()
+            self.last_counter_reset = time.time()
+            self.suspicious_patterns_count = 20
+            self.natural_patterns_count = 20
 
     def calibrate(self, eye_position):
         if self.calibration_complete:
@@ -103,11 +111,15 @@ class MicrosaccadeDetector:
     def detect_microsaccades(self, current_eye_position):
         current_time = time.time()
 
-        if hasattr(self, 'in_blink_period') and self.in_blink_period:
-            if current_time < self.blink_end_time:
-                return False, 0, {}
-            else:
-                self.in_blink_period = False
+        # Reset counters periodically to prevent unbounded growth
+        if current_time - self.last_counter_reset > 30:
+            if self.suspicious_patterns_count + self.natural_patterns_count > 1000:
+                ratio = self.natural_patterns_count / max(1, self.suspicious_patterns_count)
+                self.suspicious_patterns_count = 20
+                self.natural_patterns_count = 20 * ratio
+            self.last_counter_reset = current_time
+        else:
+            self.last_counter_reset_time = current_time
 
         if not self.calibration_complete:
             self.calibrate(current_eye_position)
@@ -116,7 +128,6 @@ class MicrosaccadeDetector:
         self.eye_position_history.append((current_eye_position[0], current_eye_position[1]))
         self.time_history.append(current_time)
 
-        # requires at least 8 samples for better detection
         if len(self.eye_position_history) < 8:
             return False, 0, {}
 
@@ -236,7 +247,12 @@ class MicrosaccadeDetector:
 
     # test for perfectly repeating patterns, machine-like cons
     def _check_movement_similarity(self, current_saccade, previous_saccade):
-        # handles circular nature of angles
+        # Reset the counters if they get too high (prevents unbounded growth)
+        if self.suspicious_patterns_count + self.natural_patterns_count > 1000:
+            ratio = self.natural_patterns_count / max(1, self.suspicious_patterns_count)
+            self.suspicious_patterns_count = 20
+            self.natural_patterns_count = 20 * ratio
+
         dir_diff = abs(current_saccade['direction'] - previous_saccade['direction'])
         dir_diff = min(dir_diff, 2 * np.pi - dir_diff)
 
@@ -246,13 +262,12 @@ class MicrosaccadeDetector:
         vel_ratio = min(current_saccade['velocity'], previous_saccade['velocity']) / max(current_saccade['velocity'],
                                                                                          previous_saccade['velocity'])
 
-        if dir_diff < 0.1 and amp_ratio > 0.95 and vel_ratio > 0.95:
+        if dir_diff < 0.01 and amp_ratio > 0.995 and vel_ratio > 0.995:
             self.consecutive_similar_movements += 1
-            self.suspicious_patterns_count += 0.25
+            self.suspicious_patterns_count += 0.1
         else:
             self.consecutive_similar_movements = max(0, self.consecutive_similar_movements - 1)
-            self.natural_patterns_count += 1
-
+            self.natural_patterns_count += 0.5
     def _find_continuous_events(self, indices):
         if len(indices) == 0:
             return []
@@ -284,32 +299,32 @@ class MicrosaccadeDetector:
         expected_ratio = candidate['amplitude'] / candidate['duration'] * 1000  # deg/s
         if expected_ratio > 0:
             ratio = candidate['velocity'] / expected_ratio
-            if not (0.3 <= ratio <= 4.0):
+            if not (0.2 <= ratio <= 5.0):
                 return False
 
-        if len(self.microsaccade_history) > 3:
+        if len(self.microsaccade_history) > 5:
             # 1. check for suspiciously periodic intervals
-            if len(self.inter_saccade_intervals) >= 3:
+            if len(self.inter_saccade_intervals) >= 5:
                 intervals = np.array(self.inter_saccade_intervals)
                 interval_cv = np.std(intervals) / np.mean(intervals) if np.mean(intervals) > 0 else 0
-                if interval_cv < 0.15:
-                    self.suspicious_patterns_count += 1
+                if interval_cv < 0.05:
+                    self.suspicious_patterns_count += 0.5
                     return False
 
             # 2. for too-perfect pattern in directions
-            if len(self.direction_history) >= 4:
+            if len(self.direction_history) >= 6:
                 directions = np.array(self.direction_history)
                 direction_changes = np.diff(np.unwrap(directions))
-                if np.std(direction_changes) < 0.15:
-                    self.suspicious_patterns_count += 1
+                if np.std(direction_changes) < 0.05:
+                    self.suspicious_patterns_count += 0.5
                     return False
 
             # 3. unusual consistency in amplitude
-            if len(self.amplitude_history) >= 4:
+            if len(self.amplitude_history) >= 6:
                 amplitudes = np.array(self.amplitude_history)
                 amp_cv = np.std(amplitudes) / np.mean(amplitudes) if np.mean(amplitudes) > 0 else 0
-                if amp_cv < 0.15:
-                    self.suspicious_patterns_count += 1
+                if amp_cv < 0.05:
+                    self.suspicious_patterns_count += 0.5
                     return False
 
         if len(self.microsaccade_history) > 0:
@@ -389,11 +404,12 @@ class MicrosaccadeDetector:
         try:
             slope, intercept = np.polyfit(log_amplitudes, log_velocities, 1, rcond=1e-3)
             corr = np.corrcoef(log_amplitudes, log_velocities)[0, 1]
-            is_valid = 0.4 <= slope <= 0.8 and corr > 0.7
 
-            if corr > 0.98:
+            is_valid = 0.3 <= slope <= 0.9 and corr > 0.5
+
+            if corr > 0.995:
                 is_valid = False
-                self.suspicious_patterns_count += 1
+                self.suspicious_patterns_count += 0.5
             return is_valid
 
         except np.linalg.LinAlgError:
@@ -401,7 +417,6 @@ class MicrosaccadeDetector:
             return True
 
     def analyze_eyelid_correlation(self, is_blinking):
-
         current_time = time.time()
 
         if is_blinking:
@@ -420,75 +435,91 @@ class MicrosaccadeDetector:
         elif len(self.blink_timestamps) > 0:
             time_since_last_blink = current_time - self.blink_timestamps[-1]
 
-            if 0.05 < time_since_last_blink < 0.3:
-                if len(self.microsaccade_history) > 0 and current_time - self.microsaccade_history[-1]['timestamp'] < 0.15:
+            if 0.05 < time_since_last_blink < 0.4:
+                if len(self.microsaccade_history) > 0 and current_time - self.microsaccade_history[-1]['timestamp'] < 0.2:  # Extended window
                     self.post_blink_microsaccades += 1
                     self.natural_patterns_count += 1
 
-        # clean up old blink timestamps to prevent memory growth
         self.blink_timestamps = [t for t in self.blink_timestamps if current_time - t < 10.0]
 
     def is_photo_detected(self):
-        if self.detect_photo_attack():
+        current_time = time.time()
+        if current_time - self.last_analysis_time < self.analysis_interval:
+            return hasattr(self, 'last_photo_detection_result') and self.last_photo_detection_result
+
+        self.last_analysis_time = current_time
+
+        if len(self.microsaccade_history) > 5 and len(self.blink_timestamps) == 0:
+            time_elapsed = current_time - self.time_history[0] if self.time_history else 0
+            if time_elapsed > 10:
+                print(
+                    f"[PHOTO_DETECTION] Early detection: No blinks after {time_elapsed:.1f} seconds with {len(self.microsaccade_history)} microsaccades")
+                self.last_photo_detection_result = True
+                return True
+
+        # Check repeating patterns
+        if self._has_repeating_patterns() and len(self.microsaccade_history) > 6:
+            print("[PHOTO_DETECTION] Detected repeating patterns")
+            self.last_photo_detection_result = True
             return True
 
-        if not self.is_natural_movement() and len(self.microsaccade_history) >= 10:
-            return True
-        if self.suspicious_patterns_count > 3 * self.natural_patterns_count and self.suspicious_patterns_count > 5:
-            return True
+        photo_detected = self.detect_photo_attack(confidence_threshold=2)
+        self.last_photo_detection_result = photo_detected
+        return photo_detected
 
-        return False
     def is_natural_movement(self):
         print(f"\n[NATURAL CHECK] Microsaccades: {len(self.microsaccade_history)}")
         print(f"Blink count: {len(self.blink_timestamps)}")
         print(f"Suspicious patterns: {self.suspicious_patterns_count}")
         print(f"Natural patterns: {self.natural_patterns_count}")
 
-        if not self.calibration_complete:
+        current_time = time.time()
+        time_since_start = current_time - self.time_history[0] if self.time_history else 0
+
+        if len(self.microsaccade_history) < 5 or not self.calibration_complete:
             return True
 
-        self.suspicious_patterns_count = 0
-        self.natural_patterns_count = 0
+        if time_since_start > 20 and len(self.blink_timestamps) == 0:
+            print(f"[PHOTO_DETECTION] No blinks detected after {time_since_start:.1f} seconds - likely a photo")
+            return False
 
-        if len(self.microsaccade_history) >= 3:
-            positions = np.array([(s['x_start'], s['y_start']) for s in self.microsaccade_history])
-            position_variance = np.var(positions)
+        if len(self.microsaccade_history) >= 5 and len(self.blink_timestamps) == 0:
+            print(f"[PHOTO_DETECTION] No blinks after {len(self.microsaccade_history)} microsaccades - likely a photo")
+            return False
 
-            if position_variance < 0.2:
-                return False
-            if self.consecutive_similar_movements >= 8:
-                return False
-            if self.microsaccade_during_blink > 4:
-                return False
-
-        if len(self.microsaccade_history) < 15:
-            if len(self.microsaccade_history) >= 5:
-                timestamps = np.array([s['timestamp'] for s in self.microsaccade_history])
-                intervals = np.diff(timestamps)
-                interval_variability = np.std(intervals) / np.mean(intervals) if np.mean(intervals) > 0 else 0
-                if interval_variability < 0.08:
-                    return False
-
-                directions = np.array([s['direction'] for s in self.microsaccade_history])
-                dir_var = np.var(np.unwrap(directions))
-                if dir_var < 0.02:
-                    return False
-
-            if self.suspicious_patterns_count > self.natural_patterns_count * 5:
+        if len(self.blink_timestamps) >= 1:
+            if self.suspicious_patterns_count > self.natural_patterns_count * 2 and len(self.microsaccade_history) > 8:
+                print(f"[PHOTO_DETECTION] Very suspicious pattern ratio despite blinks")
                 return False
             return True
+
+        if self.suspicious_patterns_count + self.natural_patterns_count > 1000:
+            ratio = self.natural_patterns_count / max(1, self.suspicious_patterns_count)
+            self.suspicious_patterns_count = 20
+            self.natural_patterns_count = 20 * ratio
+
+        if self.suspicious_patterns_count > self.natural_patterns_count * 0.8 and len(self.microsaccade_history) > 8:
+            print(f"[PHOTO_DETECTION] Suspicious patterns dominant")
+            return False
+
+        if self._has_repeating_patterns() and len(self.microsaccade_history) > 5:
+            print(f"[PHOTO_DETECTION] Repeating patterns detected")
+            return False
+
+        return True
 
         # 1. Check microsaccade rate
         current_rate = self.get_microsaccade_rate(window_seconds=5)
-        if not (0.2 <= current_rate <= 5.0):
+        if not (0.1 <= current_rate <= 6.0):
             self.suspicious_patterns_count += 1
-            return False
+        else:
+            self.natural_patterns_count += 0.5
 
         # 2. Check main sequence relationship
-        # https://www.sciencedirect.com/science/article/abs/pii/0025556475900759
         if not self.check_main_sequence():
             self.suspicious_patterns_count += 1
-            return False
+        else:
+            self.natural_patterns_count += 0.5
 
         # 3. Analyze temporal distribution
         timestamps = np.array([s['timestamp'] for s in self.microsaccade_history])
@@ -497,44 +528,45 @@ class MicrosaccadeDetector:
         if len(intervals) < 3:
             return True
 
-        # Natural microsaccades have variable intervals
-        interval_variability = np.std(intervals) / np.mean(intervals) if np.mean(intervals) > 0 else 0
-        if not (0.3 <= interval_variability <= 2.5):
+        self.interval_variability = np.std(intervals) / np.mean(intervals) if np.mean(intervals) > 0 else 0
+        if not (0.2 <= self.interval_variability):
             self.suspicious_patterns_count += 1
-            return False
+        else:
+            self.natural_patterns_count += 0.5
 
         # 4. Direction pattern analysis
         directions = np.array([s['direction'] for s in self.microsaccade_history])
         direction_changes = np.diff(np.unwrap(directions))
-        direction_variability = np.std(direction_changes)
+        self.direction_variability = np.std(direction_changes)
 
-        if direction_variability < 0.2:
+        if self.direction_variability < 0.1:
             self.suspicious_patterns_count += 1
-            return False
+        else:
+            self.natural_patterns_count += 0.5
 
         # 5. Check for post-blink microsaccades
-        if len(self.blink_timestamps) > 3 and self.post_blink_microsaccades == 0:
+        if len(self.blink_timestamps) > 5 and self.post_blink_microsaccades == 0:
             self.suspicious_patterns_count += 0.5
 
         # 6. Decision
         natural_score = self.natural_patterns_count
         suspicious_score = self.suspicious_patterns_count
 
-        if suspicious_score > natural_score + 3:
+        if suspicious_score > natural_score * 5:
             return False
         return True
 
     def _has_repeating_patterns(self):
-        if len(self.microsaccade_history) < 4:
+        if len(self.microsaccade_history) < 5:
             return False
 
-        # 1. identical amplitudes
+        # 1. Check for similar amplitudes
         amplitudes = np.array([s['amplitude'] for s in self.microsaccade_history])
         unique_amps = np.unique(np.round(amplitudes, 3))
-        if len(unique_amps) < max(2, len(amplitudes) * 0.3):
+        if len(unique_amps) < max(3, len(amplitudes) * 0.3):
             return True
 
-        # 2. identical timing intervals
+        # 2. regular timing intervals
         timestamps = np.array([s['timestamp'] for s in self.microsaccade_history])
         intervals = np.diff(timestamps)
         if len(intervals) >= 4:
@@ -542,10 +574,11 @@ class MicrosaccadeDetector:
             if cv < 0.15:
                 return True
 
-        # 3. identical direction change
+        # 3. consistent direction changes
         directions = np.array([s['direction'] for s in self.microsaccade_history])
         dir_changes = np.diff(directions)
-        if len(dir_changes) >= 3 and np.std(dir_changes) < 0.3:
+        if len(dir_changes) >= 3 and np.std(
+                dir_changes) < 0.20:
             return True
 
         # 4. perfect amplitude/velocity correlation
@@ -555,143 +588,125 @@ class MicrosaccadeDetector:
 
             if np.corrcoef(amplitudes, velocities)[0, 1] > 0.98:
                 return True
+
         return False
 
+    def detect_photo_attack(self, confidence_threshold=2):
+        # Special case for early detection
+        if len(self.microsaccade_history) > 5 and len(self.blink_timestamps) == 0:
+            time_elapsed = time.time() - self.time_history[0] if self.time_history else 0
+            if time_elapsed > 10:
+                print(
+                    f"[PHOTO_DETECTION] No blinks detected after {time_elapsed:.1f} seconds with {len(self.microsaccade_history)} microsaccades")
+                return True
 
-    # have to think better in this part, whether i can actually remove it
-    def detect_photo_attack(self):
-        if len(self.microsaccade_history) < 10:
+        if len(self.microsaccade_history) < 5:
             return False
 
         evidence_score = 0
-        confidence_threshold = 6
-
-        if len(self.microsaccade_history) < 20:
-            confidence_threshold += 2
-        if len(self.blink_timestamps) < 3:
-            if 'No post-blink microsaccades' in locals():
-                evidence_score -= 1
         print(f"[PHOTO_DETECTION] Starting photo attack analysis with {len(self.microsaccade_history)} microsaccades")
 
-        # 1. Check position variance
+        # 1. Check for blinks
+        if len(self.blink_timestamps) == 0:
+            evidence_score += min(3, len(self.microsaccade_history) // 3)
+            print(f"[PHOTO_DETECTION] No blinks detected: +{min(3, len(self.microsaccade_history) // 3)} points")
+
+        # 2. eye position variance
         positions = np.array([(s['x_start'], s['y_start']) for s in self.microsaccade_history])
         position_variance = np.var(positions, axis=0).sum()
 
         print(f"[PHOTO_DETECTION] Position variance: {position_variance:.4f}")
 
-        if position_variance < 0.7:
-            evidence_score += 2
-            print(f"[PHOTO_DETECTION] Low position variance detected: +2 points")
-        elif position_variance < 1.5:
+        # Low variance can mean static image
+        if position_variance < 10:
             evidence_score += 1
-            print(f"[PHOTO_DETECTION] Moderately low position variance: +1 point")
+            print(f"[PHOTO_DETECTION] Unusually low position variance: +1 point")
+        elif position_variance > 40:
+            evidence_score += 1
+            print(f"[PHOTO_DETECTION] Unusually high position variance: +1 point")
 
-        # 2. Check for suspiciously regular timing
-        timestamps = np.array([s['timestamp'] for s in self.microsaccade_history])
-        intervals = np.diff(timestamps)
+        # 3. Check microsaccade rate consistency
+        if len(self.microsaccade_history) > 8:
+            timestamps = np.array([s['timestamp'] for s in self.microsaccade_history])
+            segments = np.array_split(timestamps, min(3, len(timestamps) // 3))
+            rates = []
 
-        if len(intervals) >= 3:
-            cv = np.std(intervals) / np.mean(intervals) if np.mean(intervals) > 0 else 0
-            print(f"[PHOTO_DETECTION] Interval CV: {cv:.4f}")
+            for segment in segments:
+                if len(segment) >= 2:
+                    duration = segment[-1] - segment[0]
+                    if duration > 0:
+                        rate = len(segment) / duration
+                        rates.append(rate)
 
-            if cv < 0.25:
-                evidence_score += 2
-                print(f"[PHOTO_DETECTION] Very regular timing detected: +2 points")
-            elif cv < 0.4:
-                evidence_score += 1
-                print(f"[PHOTO_DETECTION] Somewhat regular timing: +1 point")
+            if len(rates) >= 2:
+                rate_variation = np.std(rates) / np.mean(rates) if np.mean(rates) > 0 else 0
+                print(f"[PHOTO_DETECTION] Microsaccade rate variation: {rate_variation:.4f}")
 
-        # 3. Check amplitude distribution
+                if rate_variation < 0.3:
+                    evidence_score += 2
+                    print(f"[PHOTO_DETECTION] Unusually consistent microsaccade rate: +2 points")
+
+        # 4. Check amplitude distribution
         amplitudes = np.array([s['amplitude'] for s in self.microsaccade_history])
-        unique_amplitudes = len(np.unique(np.round(amplitudes, 2)))
-        print(f"[PHOTO_DETECTION] Unique amplitude values: {unique_amplitudes}/{len(amplitudes)}")
+        if len(amplitudes) >= 5:
+            try:
+                from scipy.stats import gaussian_kde
+                density = gaussian_kde(amplitudes)
+                test_points = np.linspace(min(amplitudes), max(amplitudes), 20)
+                density_vals = density(test_points)
 
-        if unique_amplitudes < 2 and len(amplitudes) >= 3:
-            evidence_score += 2
-            print(f"[PHOTO_DETECTION] Identical amplitudes detected: +2 points")
-        elif unique_amplitudes / len(amplitudes) < 0.3 and len(amplitudes) >= 5:
+                peaks = np.where((density_vals[1:-1] > density_vals[:-2]) &
+                                 (density_vals[1:-1] > density_vals[2:]))[0] + 1
+
+                if len(peaks) <= 1:
+                    evidence_score += 1
+                    print(f"[PHOTO_DETECTION] Limited amplitude diversity: +1 point")
+            except:
+                pass
+
+        # 5. unnatural consistent movement patterns
+        if len(self.microsaccade_history) >= 6:
+            velocities = np.array([s['velocity'] for s in self.microsaccade_history])
+            directions = np.array([s['direction'] for s in self.microsaccade_history])
+
+            vel_diffs = np.diff(velocities)
+            dir_diffs = np.diff(np.unwrap(directions))
+
+            if len(vel_diffs) >= 3:
+                vel_pattern_score = np.std(vel_diffs) / np.mean(np.abs(vel_diffs)) if np.mean(
+                    np.abs(vel_diffs)) > 0 else 0
+                if vel_pattern_score < 0.5:
+                    evidence_score += 1
+                    print(f"[PHOTO_DETECTION] Repetitive velocity pattern: +1 point")
+
+            if len(dir_diffs) >= 3:
+                dir_pattern_score = np.std(dir_diffs) / np.mean(np.abs(dir_diffs)) if np.mean(
+                    np.abs(dir_diffs)) > 0 else 0
+                if dir_pattern_score < 0.5:
+                    evidence_score += 1
+                    print(f"[PHOTO_DETECTION] Repetitive direction pattern: +1 point")
+
+        # 6. suspicious vs natural patterns
+        if len(self.microsaccade_history) > 5:
+            nat_to_sus_ratio = self.natural_patterns_count / max(1, self.suspicious_patterns_count)
+
+            if nat_to_sus_ratio < 1.0:
+                evidence_score += 1
+                print(f"[PHOTO_DETECTION] Low natural/suspicious pattern ratio ({nat_to_sus_ratio:.2f}): +1 point")
+
+        # 7. lack of blink-related microsaccades
+        if len(self.blink_timestamps) > 2 and self.post_blink_microsaccades == 0:
             evidence_score += 1
-            print(f"[PHOTO_DETECTION] Low amplitude variety: +1 point")
+            print(f"[PHOTO_DETECTION] No post-blink microsaccades despite multiple blinks: +1 point")
 
-        # 4. Check direction patterns
-        directions = np.array([
-            np.arctan2(s['y_end'] - s['y_start'], s['x_end'] - s['x_start'])
-            for s in self.microsaccade_history
-        ])
-        if len(directions) >= 3:
-            direction_changes = np.diff(np.unwrap(directions))
-            dir_std = np.std(direction_changes)
-            print(f"[PHOTO_DETECTION] Direction std: {dir_std:.4f}")
-
-            if dir_std < 0.3:
-                evidence_score += 1
-                print(f"[PHOTO_DETECTION] Low direction variation: +1 point")
-            elif dir_std < 0.15:
-                evidence_score += 2
-                print(f"[PHOTO_DETECTION] Very low direction variation: +2 points")
-
-        # 5. Check blink-movement correlation
-        if len(self.blink_timestamps) > 0:
-            print(
-                f"[PHOTO_DETECTION] Blinks: {len(self.blink_timestamps)}, during blink: {self.microsaccade_during_blink}, post-blink: {self.post_blink_microsaccades}")
-
-            if self.microsaccade_during_blink > 2:
-                evidence_score += 2
-                print(f"[PHOTO_DETECTION] Microsaccades during blinks: +2 points")
-
-            if self.post_blink_microsaccades == 0 and len(self.blink_timestamps) >= 3:
-                evidence_score += 1
-                print(f"[PHOTO_DETECTION] No post-blink microsaccades: +1 point")
-
-        # 6. Check for repeating patterns in eye movements
-        if self._has_repeating_patterns():
-            evidence_score += 2
-            print(f"[PHOTO_DETECTION] Repeating movement patterns: +2 points")
-
-        # 7. Check for unnatural stillness
-        if len(self.inter_saccade_intervals) >= 3:
-            max_interval = max(self.inter_saccade_intervals)
-            print(f"[PHOTO_DETECTION] Max interval: {max_interval:.2f}s")
-
-            if max_interval > 2.0:
-                evidence_score += 1
-                print(f"[PHOTO_DETECTION] Unnatural stillness between movements: +1 point")
-
-        # 8. Check main sequence relationship
-        main_sequence_valid = self.check_main_sequence()
-        print(f"[PHOTO_DETECTION] Main sequence valid: {main_sequence_valid}")
-
-        if not main_sequence_valid:
-            evidence_score += 2
-            print(f"[PHOTO_DETECTION] Violated main sequence: +2 points")
-
-        # 9. Check for similar movements
-        if self.consecutive_similar_movements >= 3:
-            evidence_score += self.consecutive_similar_movements // 3
-            print(
-                f"[PHOTO_DETECTION] Consecutive similar movements ({self.consecutive_similar_movements}): +{self.consecutive_similar_movements // 3} points")
         print(f"[PHOTO_DETECTION] Total evidence score: {evidence_score}/{confidence_threshold}")
 
         if evidence_score >= confidence_threshold:
-            if evidence_score <= confidence_threshold + 1:
-                strong_indicators = [
-                    position_variance < 0.5,
-                    len(np.unique(np.round(amplitudes, 2))) < 2 if len(amplitudes) >= 3 else False,
-                    self.microsaccade_during_blink > 3,
-                    not main_sequence_valid,
-                    self.consecutive_similar_movements >= 5
-                ]
-                strong_count = sum(strong_indicators)
-                print(f"[PHOTO_DETECTION] Strong indicators: {strong_count}/5")
-
-                if strong_count < 2:
-                    return False
             print(f"[PHOTO_DETECTION] PHOTO ATTACK DETECTED")
             return True
 
         return False
     def get_detection_stats(self):
-        """Return current detection statistics with enhanced information"""
         return {
             'total_detections': self.detection_count,
             'rate': self.get_microsaccade_rate(),

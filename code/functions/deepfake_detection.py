@@ -104,7 +104,6 @@ def check_eye_movement(eye_landmarks, face_center, is_blinking=False):
                     debug_info['photo_attack_suspected'] = True
                     debug_info['reason'].append("Suspicious movement pattern detected")
 
-    # Check if movement is natural using the microsaccade detector
     if not microsaccade_detector.is_natural_movement():
         debug_info['movement_detected'] = True
         debug_info['reason'].append("Unnatural eye movement pattern")
@@ -155,24 +154,34 @@ def check_ear_consistency(ear):
 
 def analyze_reflections(eye_region):
     debug_info = {
-        'reflections_found': True,
+        'reflections_found': False,
         'count': 0
     }
 
-    if eye_region.size == 0:
+    if eye_region.size == 0 or eye_region.shape[0] < 5 or eye_region.shape[1] < 5:
         debug_info['reason'] = "Empty eye region"
         print(f"[REFLECTIONS] {debug_info}")
         return False
 
-    gray_eye = cv2.cvtColor(eye_region, cv2.COLOR_BGR2GRAY)
-    _, reflection_mask = cv2.threshold(gray_eye, 100, 255, cv2.THRESH_BINARY)
-    reflection_count = np.sum(reflection_mask > 0)
+    if len(eye_region.shape) == 3:
+        gray_eye = cv2.cvtColor(eye_region, cv2.COLOR_BGR2GRAY)
+    else:
+        gray_eye = eye_region.copy()
+
+    adaptive_thresh = cv2.adaptiveThreshold(
+        gray_eye, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 11, -2)
+
+    contours, _ = cv2.findContours(adaptive_thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    valid_reflections = [cnt for cnt in contours if cv2.contourArea(cnt) >= 4]
+    reflection_count = len(valid_reflections)
 
     debug_info['count'] = reflection_count
-    debug_info['reflections_found'] = reflection_count >= 2
+    debug_info['reflections_found'] = reflection_count >= 1
 
     status = "OK" if debug_info['reflections_found'] else "WARNING"
-    reflection_text = (f"{reflection_count} reflections (needs 2+) - {status} | "
+    reflection_text = (f"{reflection_count} reflections (needs 1+) - {status} | "
                        f"{debug_info.get('reason', 'Normal reflections')}")
     print(f"[REFLECTIONS] {reflection_text}")
+
     return not debug_info['reflections_found']
