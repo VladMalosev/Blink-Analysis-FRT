@@ -31,7 +31,6 @@ def main(demo_mode=False, interactive_mode=False):
     global blink_count, blink_active, baseline_ear, baseline_eye_height, frame_count, ear_history, cooldown_counter, blink_timestamps
 
     def display_warnings(frame, warnings_list):
-        """Display warnings with priority."""
         if not warnings_list:
             return
 
@@ -60,7 +59,7 @@ def main(demo_mode=False, interactive_mode=False):
 
     WARNING_PERSISTENCE_THRESHOLD = 30
     MAX_WARNING_PERSISTENCE = 90
-
+    photo_attack_detected_persistent = False
     BASELINE_FRAMES = 30
     SMOOTHING_WINDOW = 2
     BLINK_COOLDOWN = 1
@@ -602,11 +601,14 @@ def main(demo_mode=False, interactive_mode=False):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
             if microsaccade_detector.calibration_complete and (not interactive_mode or calibration_complete):
-                photo_attack_detected = microsaccade_detector.detect_photo_attack()
-                if photo_attack_detected:
+                current_photo_attack_detected = microsaccade_detector.detect_photo_attack()
+
+                if current_photo_attack_detected and not natural_movement:
+                    photo_attack_detected_persistent = True
+
+                if photo_attack_detected_persistent:
                     cv2.putText(frame, "PHOTO ATTACK SUSPECTED!", (350, 120),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                    natural_movement = False
 
             if frame_count >= BASELINE_FRAMES:
                 blink_status = "BLINKING" if blink_active else "READY"
